@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Copart CRM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #161410;
+      --bg-2: #1e1a14;
+      --panel: #241f18;
+      --line: #3a3329;
+      --text: #f3eadc;
+      --muted: #b7aa96;
+      --copper: #d08a3a;
+      --copper-2: #f0b36a;
+      --ok: #7cb389;
+      --warn: #e0b25a;
+      --bad: #d37a6a;
+      --new: #d08a3a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: "IBM Plex Sans", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #2a2218 0%, var(--bg) 45%);
+      color: var(--text);
+    }
+    a { color: var(--copper-2); }
+    .app {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      min-height: 100%;
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      background: #1a1611;
+      padding: 22px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .brand {
+      font-family: Newsreader, serif;
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .brand span { color: var(--copper); }
+    .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stat {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .stat b { display: block; font-size: 22px; font-family: Newsreader, serif; }
+    .stat small { color: var(--muted); }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 8px 0; }
+    .search-item {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      margin-bottom: 8px;
+      background: var(--bg-2);
+    }
+    .search-item strong { display: block; margin-bottom: 4px; }
+    .search-item .row { display: flex; gap: 8px; margin-top: 8px; }
+    button, select, input, textarea {
+      font: inherit;
+      color: var(--text);
+    }
+    button {
+      background: var(--copper);
+      color: #1a130c;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+    button.small { padding: 5px 8px; font-size: 12px; }
+    input, select, textarea {
+      width: 100%;
+      background: #120f0c;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    form.add { display: flex; flex-direction: column; gap: 8px; }
+    main { padding: 22px 26px 40px; }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; }
+    .filters > * { width: auto; min-width: 140px; }
+    .sync { color: var(--muted); font-size: 13px; text-align: right; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; font-weight: 500; }
+    tr.lot:hover { background: #221c16; }
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .s-new { background: #3a2a16; color: var(--copper-2); }
+    .s-watching { background: #1d2a22; color: var(--ok); }
+    .s-bid { background: #2a2614; color: var(--warn); }
+    .s-skip, .s-lost { background: #2a1c1a; color: var(--bad); }
+    .s-won { background: #1d2a22; color: var(--ok); }
+    .gone { opacity: 0.55; }
+    .title { font-weight: 600; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .drawer {
+      position: fixed;
+      right: 0; top: 0; bottom: 0;
+      width: min(420px, 100%);
+      background: #1b1712;
+      border-left: 1px solid var(--line);
+      padding: 22px;
+      display: none;
+    }
+    .drawer.open { display: block; }
+    .empty { padding: 40px 10px; color: var(--muted); }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand">Copart <span>CRM</span></div>
+      <div class="hint">Каждые 10 минут бот открывает ваши поиски Copart и подбирает подходящие авто.</div>
+      <div class="stats" id="stats"></div>
+      <div class="sync" id="sync"></div>
+      <button id="syncNow">Проверить сейчас</button>
+      <h2>Поиски</h2>
+      <div id="searches"></div>
+      <form class="add" id="addSearch">
+        <input name="name" placeholder="Название, например Audi A8" required />
+        <textarea name="url" rows="3" placeholder="URL поиска с Copart" required></textarea>
+        <button type="submit">Добавить поиск</button>
+      </form>
+    </aside>
+    <main>
+      <div class="top">
+        <div>
+          <div class="brand" style="font-size:26px">Подбор авто</div>
+          <div class="hint">Лоты из всех включённых ссылок. Новые помечаются отдельно.</div>
+        </div>
+        <div class="filters">
+          <select id="status">
+            <option value="">Все статусы</option>
+            <option value="new">Новые</option>
+            <option value="watching">Слежу</option>
+            <option value="bid">Ставка</option>
+            <option value="skip">Не нужно</option>
+            <option value="won">Купил</option>
+            <option value="lost">Ушло</option>
+          </select>
+          <select id="stock">
+            <option value="in">Сейчас на Copart</option>
+            <option value="out">Уже нет в поиске</option>
+            <option value="all">Все</option>
+          </select>
+          <input id="q" placeholder="Поиск по названию / lot" />
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Авто</th>
+            <th>Поиск</th>
+            <th>Ставка</th>
+            <th>Аукцион</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>Пока нет лотов. Добавьте поиск и нажмите «Проверить сейчас».</div>
+    </main>
+  </div>
+
+  <aside class="drawer" id="drawer"></aside>
+
+  <script>
+    const STATUS = {
+      new: "Новое",
+      watching: "Слежу",
+      bid: "Ставка",
+      skip: "Не нужно",
+      won: "Купил",
+      lost: "Ушло",
+    };
+
+    let selected = null;
+
+    async function api(path, opts) {
+      const res = await fetch(path, Object.assign({
+        headers: { "Content-Type": "application/json" },
+      }, opts));
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text);
+      }
+      if (res.status === 204) return null;
+      return res.json();
+    }
+
+    function money(v) {
+      if (v === null || v === undefined || v === "") return "—";
+      return "£" + Number(v).toLocaleString("en-GB", { maximumFractionDigits: 0 });
+    }
+
+    function when(v) {
+      if (!v) return "ещё не было";
+      const d = new Date(v);
+      return d.toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    }
+
+    async function loadState() {
+      const state = await api("/api/state");
+      document.getElementById("stats").innerHTML = `
+        <div class="stat"><b>${state.stats.in_search ?? state.stats.in_stock}</b><small>в поиске</small></div>
+        <div class="stat"><b>${state.stats.new}</b><small>новых</small></div>
+      `;
+      const last = state.sync.last;
+      document.getElementById("sync").textContent = state.sync.running
+        ? "Идёт проверка Copart…"
+        : last
+          ? `Последняя проверка: ${when(last.finished_at || last.started_at)}`
+          : "Проверка ещё не запускалась";
+      document.getElementById("searches").innerHTML = state.searches.map(s => `
+        <div class="search-item">
+          <strong>${esc(s.name)}</strong>
+          <div class="hint">${s.in_search ?? 0} в поиске · ${s.new_count ?? 0} новых · ${s.enabled ? "включён" : "выключен"}</div>
+          <div class="row">
+            <button class="ghost small" onclick="toggleSearch(${s.id}, ${s.enabled ? "false" : "true"})">${s.enabled ? "Выкл" : "Вкл"}</button>
+            <button class="ghost small" onclick="delSearch(${s.id})">Удалить</button>
+          </div>
+        </div>
+      `).join("") || `<div class="hint">Добавьте URL поиска справа внизу.</div>`;
+    }
+
+    async function loadLots() {
+      const params = new URLSearchParams();
+      const status = document.getElementById("status").value;
+      const stock = document.getElementById("stock").value;
+      const q = document.getElementById("q").value.trim();
+      if (status) params.set("status", status);
+      params.set("stock", stock);
+      if (q) params.set("q", q);
+      const lots = await api("/api/lots?" + params.toString());
+      const body = document.getElementById("rows");
+      document.getElementById("empty").hidden = lots.length > 0;
+      body.innerHTML = lots.map(lot => `
+        <tr class="lot ${lot.in_stock ? "" : "gone"}" onclick='openLot(${JSON.stringify(lot.lot_id)})'>
+          <td>
+            <div class="title">${esc(lot.title || "Lot " + lot.lot_id)}</div>
+            <div class="meta">#${esc(lot.lot_id)} · ${esc(lot.location || "площадка ?")} · ${esc(lot.category ? "Cat " + lot.category : "")}</div>
+          </td>
+          <td>${esc((lot.search_names || []).join(", ") || "—")}</td>
+          <td>${money(lot.bid)}</td>
+          <td>${esc(lot.sale_date || "—")}${lot.event === "relist" ? "<div class='meta'>повторный аукцион</div>" : ""}</td>
+          <td><span class="badge s-${lot.status}">${STATUS[lot.status] || lot.status}</span></td>
+        </tr>
+      `).join("");
+    }
+
+    async function openLot(id) {
+      const lots = await api("/api/lots?stock=all&q=" + encodeURIComponent(id));
+      const lot = lots.find(x => x.lot_id === id) || lots[0];
+      if (!lot) return;
+      selected = lot;
+      const el = document.getElementById("drawer");
+      el.classList.add("open");
+      el.innerHTML = `
+        <button class="ghost" onclick="document.getElementById('drawer').classList.remove('open')">Закрыть</button>
+        <h2 style="margin-top:18px;color:var(--text);text-transform:none;font-family:Newsreader,serif;font-size:28px;letter-spacing:-0.03em">${esc(lot.title)}</h2>
+        <p class="hint">Lot ${esc(lot.lot_id)} · поиск: ${esc((lot.search_names||[]).join(", "))}</p>
+        <p>Ставка ${money(lot.bid)}<br>Аукцион ${esc(lot.sale_date || "—")}<br>Пробег ${lot.odometer ?? "—"}<br>${lot.in_stock ? "Сейчас есть в поиске" : "Больше нет в результатах"}</p>
+        <p><a href="${esc(lot.url)}" target="_blank" rel="noreferrer">Открыть на Copart</a></p>
+        <label class="hint">Статус</label>
+        <select id="lotStatus">${Object.entries(STATUS).map(([k,v]) => `<option value="${k}" ${k===lot.status?"selected":""}>${v}</option>`).join("")}</select>
+        <div style="height:10px"></div>
+        <label class="hint">Заметка</label>
+        <textarea id="lotNotes" rows="5">${esc(lot.notes || "")}</textarea>
+        <div style="height:10px"></div>
+        <button onclick="saveLot()">Сохранить</button>
+      `;
+    }
+
+    async function saveLot() {
+      if (!selected) return;
+      await api("/api/lots/" + selected.lot_id, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: document.getElementById("lotStatus").value,
+          notes: document.getElementById("lotNotes").value,
+        }),
+      });
+      document.getElementById("drawer").classList.remove("open");
+      await refresh();
+    }
+
+    async function toggleSearch(id, enabled) {
+      await api("/api/searches/" + id + "/enabled", {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
+      });
+      await refresh();
+    }
+
+    async function delSearch(id) {
+      if (!confirm("Удалить этот поиск?")) return;
+      await api("/api/searches/" + id, { method: "DELETE" });
+      await refresh();
+    }
+
+    function esc(v) {
+      return String(v ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    async function refresh() {
+      await loadState();
+      await loadLots();
+    }
+
+    document.getElementById("addSearch").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      await api("/api/searches", {
+        method: "POST",
+        body: JSON.stringify({ name: data.get("name"), url: data.get("url") }),
+      });
+      e.target.reset();
+      await refresh();
+    });
+    document.getElementById("syncNow").addEventListener("click", async () => {
+      document.getElementById("syncNow").disabled = true;
+      try {
+        await api("/api/sync", { method: "POST" });
+      } catch (err) {
+        alert(err.message);
+      }
+      document.getElementById("syncNow").disabled = false;
+      await refresh();
+    });
+    document.getElementById("status").addEventListener("change", loadLots);
+    document.getElementById("stock").addEventListener("change", loadLots);
+    document.getElementById("q").addEventListener("input", () => {
+      clearTimeout(window._t);
+      window._t = setTimeout(loadLots, 250);
+    });
+
+    refresh();
+    setInterval(refresh, 20000);
+  </script>
+</body>
+</html>
