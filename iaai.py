@@ -137,6 +137,62 @@ IAAI_VIRTUAL_BID_BANDS = [
     (float("inf"), 160, 140),
 ]
 
+# Copart USA, licensed business buyer, standard vehicle, secured payment.
+# "standard" = fewer than 25 vehicles OR less than $75k/year OR 5+ bidder accounts.
+# "high" = 25+ vehicles AND $75k+/year AND fewer than 5 bidder accounts.
+# Tables verified against the official Copart U.S. Licensed Fees page (2026-09-10).
+# Values are (max final bid, high-volume fee, standard-volume fee).
+COPART_US_NON_CLEAN_BUYER_FEE_BANDS = [
+    (49.99, 1, 25), (99.99, 1, 45), (199.99, 25, 80), (299.99, 60, 130),
+    (349.99, 85, 137.5), (399.99, 100, 145), (449.99, 125, 175),
+    (499.99, 135, 185), (549.99, 145, 205), (599.99, 155, 210),
+    (699.99, 170, 240), (799.99, 195, 270), (899.99, 215, 295),
+    (999.99, 230, 320), (1199.99, 250, 375), (1299.99, 270, 395),
+    (1399.99, 285, 410), (1499.99, 300, 430), (1599.99, 315, 445),
+    (1699.99, 330, 465), (1799.99, 350, 485), (1999.99, 370, 510),
+    (2399.99, 390, 535), (2499.99, 425, 570), (2999.99, 460, 610),
+    (3499.99, 505, 655), (3999.99, 555, 705), (4499.99, 600, 725),
+    (4999.99, 625, 750), (5499.99, 650, 775), (5999.99, 675, 800),
+    (6499.99, 700, 825), (6999.99, 720, 845), (7499.99, 755, 880),
+    (7999.99, 775, 900), (8499.99, 800, 925), (8999.99, 820, 945),
+    (9999.99, 820, 945), (10499.99, 850, 1000), (10999.99, 850, 1000),
+    (11499.99, 850, 1000), (11999.99, 860, 1000), (12499.99, 875, 1000),
+    (14999.99, 890, 1000),
+]
+
+COPART_US_CLEAN_BUYER_FEE_BANDS = [
+    (49.99, 1, 25), (99.99, 1, 45), (199.99, 25, 80), (299.99, 50, 120),
+    (349.99, 75, 120), (399.99, 75, 120), (449.99, 110, 160),
+    (499.99, 110, 160), (549.99, 125, 185), (599.99, 130, 185),
+    (699.99, 140, 210), (799.99, 155, 230), (899.99, 170, 250),
+    (999.99, 185, 275), (1199.99, 200, 325), (1299.99, 225, 350),
+    (1399.99, 240, 365), (1499.99, 250, 380), (1599.99, 260, 390),
+    (1699.99, 275, 410), (1799.99, 285, 420), (1999.99, 300, 440),
+    (2399.99, 325, 470), (2499.99, 335, 480), (2999.99, 350, 500),
+    (3499.99, 400, 600), (3999.99, 455, 675), (4499.99, 600, 710),
+    (4999.99, 625, 750), (5499.99, 625, 750), (5999.99, 625, 750),
+    (6499.99, 675, 800), (6999.99, 675, 800), (7499.99, 675, 800),
+    (7999.99, 690, 815), (8499.99, 715, 840), (8999.99, 715, 840),
+    (9999.99, 715, 840), (10499.99, 720, 850), (10999.99, 720, 850),
+    (11499.99, 720, 850), (11999.99, 720, 850), (12499.99, 720, 850),
+    (14999.99, 720, 850),
+]
+
+COPART_US_VIRTUAL_BID_BANDS = [
+    (99.99, 0, 0),
+    (499.99, 49, 39),
+    (999.99, 59, 49),
+    (1499.99, 79, 69),
+    (1999.99, 89, 79),
+    (3999.99, 99, 89),
+    (5999.99, 109, 99),
+    (7999.99, 139, 119),
+    (float("inf"), 149, 129),
+]
+COPART_US_GATE_FEE_CLEAN = 79.0
+COPART_US_GATE_FEE_NON_CLEAN = 95.0
+COPART_US_ENVIRONMENTAL_FEE = 15.0
+
 
 def get_iaai_buyer_fee(price: float, *, volume: str = "high") -> float:
     sale = float(price or 0)
@@ -156,6 +212,92 @@ def get_iaai_virtual_bid_fee(price: float, method: str = "live") -> float:
         if sale <= max_price:
             return float(proxy_fee if proxy else live_fee)
     return 140.0 if proxy else 160.0
+
+
+def _copart_us_is_clean_title(title_code: str | None) -> bool:
+    text = str(title_code or "").strip().lower()
+    if "non-clean" in text or "non clean" in text:
+        return False
+    return "clean title" in text
+
+
+def get_copart_us_buyer_fee(
+    price: float,
+    *,
+    volume: str = "standard",
+    clean_title: bool = False,
+) -> float:
+    sale = float(price or 0)
+    high = str(volume or "standard").strip().lower() == "high"
+    if sale >= 15000:
+        if clean_title:
+            return round2(sale * (0.0575 if high else 0.0725))
+        return round2(sale * (0.06 if high else 0.075))
+    bands = COPART_US_CLEAN_BUYER_FEE_BANDS if clean_title else COPART_US_NON_CLEAN_BUYER_FEE_BANDS
+    for max_price, high_fee, standard_fee in bands:
+        if sale <= max_price:
+            return float(high_fee if high else standard_fee)
+    return 0.0
+
+
+def get_copart_us_virtual_bid_fee(price: float, method: str = "live") -> float:
+    sale = float(price or 0)
+    proxy = str(method or "live").strip().lower() == "proxy"
+    for max_price, live_fee, proxy_fee in COPART_US_VIRTUAL_BID_BANDS:
+        if sale <= max_price:
+            return float(proxy_fee if proxy else live_fee)
+    return 129.0 if proxy else 149.0
+
+
+def estimate_copart_us_wholesale(
+    bid: float,
+    *,
+    bid_method: str = "live",
+    volume: str = "standard",
+    title_code: str | None = None,
+) -> dict:
+    sale = round2(bid)
+    clean_title = _copart_us_is_clean_title(title_code)
+    buyer_high = get_copart_us_buyer_fee(sale, volume="high", clean_title=clean_title)
+    buyer_standard = get_copart_us_buyer_fee(sale, volume="standard", clean_title=clean_title)
+    is_high = str(volume or "standard").strip().lower() == "high"
+    buyer = buyer_high if is_high else buyer_standard
+    method = "proxy" if str(bid_method or "").strip().lower() == "proxy" else "live"
+    virtual = get_copart_us_virtual_bid_fee(sale, method)
+    gate = COPART_US_GATE_FEE_CLEAN if clean_title else COPART_US_GATE_FEE_NON_CLEAN
+    environmental = COPART_US_ENVIRONMENTAL_FEE
+    fixed = round2(gate + environmental)
+    fees_net = round2(buyer + virtual + fixed)
+    return {
+        "auction": "copart",
+        "market": "US",
+        "currency": "USD",
+        "volume": "high" if is_high else "standard",
+        "volume_label": (
+            "High Volume · 25+ авто и $75k+/год"
+            if is_high
+            else "Standard · условие 12+ не даёт скидку в USA"
+        ),
+        "bid": sale,
+        "buyer_fee": buyer,
+        "buyer_fee_high": buyer_high,
+        "buyer_fee_standard": buyer_standard,
+        "saving_vs_standard": round2(buyer_standard - buyer_high) if is_high else 0.0,
+        "saving_vs_high": round2(buyer_standard - buyer_high) if not is_high else 0.0,
+        "bid_method": method,
+        "virtual_bid": virtual,
+        "service_fee": gate,
+        "service_fee_label": "Gate Fee",
+        "environmental_fee": environmental,
+        "title_fee": 0.0,
+        "fixed_fees": fixed,
+        "fees_net": fees_net,
+        "iaai_total": round2(sale + fees_net),
+        "fees_source": "copart_us",
+        "title_group": "clean" if clean_title else "non_clean",
+        "title_group_label": "Clean Title" if clean_title else "Non-Clean Title",
+        "payment_method": "secured",
+    }
 
 
 def estimate_bidcars_auction_fees(bid: float, auction_fees_usd: float) -> dict:
@@ -288,6 +430,13 @@ def quote_iaai(
     if is_restoration:
         fees = float(auction_fees_usd) if auction_fees_usd is not None else 0.0
         iaai = estimate_bidcars_auction_fees(float(bid), fees)
+    elif str(auction_platform or "").strip().lower() == "copart":
+        iaai = estimate_copart_us_wholesale(
+            float(bid),
+            bid_method=bid_method,
+            volume=volume,
+            title_code=title_code or documents,
+        )
     else:
         iaai = estimate_iaai_wholesale(float(bid), bid_method=bid_method, volume=volume)
     kg = None if dismantle_kg in (None, "") else float(dismantle_kg)
@@ -420,7 +569,7 @@ def quote_iaai(
     usa_with_fees = round2(america_subtotal + dispatching + transfer_fee)
 
     return {
-        "auction": "iaai",
+        "auction": iaai.get("auction") or "iaai",
         "purpose": "restoration" if is_restoration else "iaai",
         "vehicle_size": size_raw or None,
         "vehicle_size_label": RESTORATION_SIZE_LABELS.get(size_raw) if size_raw else None,
@@ -451,6 +600,7 @@ def quote_iaai(
 def format_iaai_quote_text(lot: dict, quote: dict) -> str:
     iaai = quote["iaai"]
     is_high = iaai.get("volume") == "high"
+    auction_label = "Copart USA" if iaai.get("auction") == "copart" else "IAAI USA"
     fees_from_bidcars = iaai.get("fees_source") == "bidcars" or (
         quote.get("purpose") == "restoration" and iaai.get("auction_fees_usd") is not None
     )
@@ -459,7 +609,7 @@ def format_iaai_quote_text(lot: dict, quote: dict) -> str:
         (
             "Расчёт под восстановление"
             if quote.get("purpose") == "restoration"
-            else f"Расчёт IAAI USA — {iaai.get('volume_label') or 'Standard'}"
+            else f"Расчёт {auction_label} — {iaai.get('volume_label') or 'Standard'}"
         ),
         "━━━━━━━━━━━━━━━━━━━━",
     ]
@@ -494,16 +644,17 @@ def format_iaai_quote_text(lot: dict, quote: dict) -> str:
             [
                 f"Тип авто: {quote.get('vehicle_size_label') or quote['dismantle_type']}",
                 f"Покупатель: {iaai['volume_label']}",
+                *([f"Title: {iaai['title_group_label']}"] if iaai.get("title_group_label") else []),
                 f"Ставка online: {'Live' if iaai['bid_method'] == 'live' else 'Proxy'}",
                 "",
                 f"Bid Amount: ${iaai['bid']:,.2f}",
                 buyer_line,
                 f"Internet Bid Fee: ${iaai['virtual_bid']:,.2f}",
-                f"Service Fee: ${iaai['service_fee']:,.2f}",
+                f"{iaai.get('service_fee_label') or 'Service Fee'}: ${iaai['service_fee']:,.2f}",
                 f"Environmental Fee: ${iaai['environmental_fee']:,.2f}",
-                f"Title Handling Fee: ${iaai['title_fee']:,.2f}",
+                *([f"Title Handling Fee: ${iaai['title_fee']:,.2f}"] if iaai.get("title_fee") else []),
                 "────────────────────",
-                f"IAAI Total / Estimated Final Cost: ${iaai['iaai_total']:,.2f}",
+                f"{auction_label} Total / Estimated Final Cost: ${iaai['iaai_total']:,.2f}",
             ]
         )
     delivery = quote.get("delivery_usa")

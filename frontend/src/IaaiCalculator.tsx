@@ -91,6 +91,7 @@ export default function IaaiCalculator({
   const [sublotChecking, setSublotChecking] = useState(false);
   const [sublotStatus, setSublotStatus] = useState("");
   const sublotCheckedRef = useRef<string | null>(null);
+  const isCopartUs = lot?.auction_platform === "copart" || lot?.source === "copart_us";
 
   const historyIdRef = useRef(historyId);
   const onHistoryIdRef = useRef(onHistoryId);
@@ -278,9 +279,8 @@ export default function IaaiCalculator({
           images: lot?.images || null,
           purpose: isRestoration ? "restoration" : "iaai",
           vehicle_size: isRestoration ? vehicleSize : null,
-          auction_platform: isRestoration
-            ? lot?.auction_platform || (lot?.source === "copart_us" ? "copart" : "iaai")
-            : null,
+          auction_platform:
+            lot?.auction_platform || (lot?.source === "copart_us" ? "copart" : "iaai"),
           ocean_destination: isRestoration ? oceanDestination : null,
           title_code: titleDocument || lot?.title_code || lot?.documents || null,
           is_sublot: isRestoration ? Boolean(lot?.is_sublot) : null,
@@ -381,11 +381,13 @@ export default function IaaiCalculator({
                   </div>
                 );
               })()}
-              <h3>{lot?.title || (isRestoration ? "Авто под восстановление" : "IAAI через Bid.cars")}</h3>
+              <h3>{lot?.title || (isRestoration ? "Авто под восстановление" : "Аукцион USA")}</h3>
               <p className="hint">
                 {isRestoration
                   ? "Аукционные сборы — с Bid.cars. Доставка до порта и море — из прайса MG GROUP по размеру: Regular / Large, Oversize, Moto."
-                  : "Аукционные сборы — как на аккаунте IAAI (Standard по умолчанию). До разборки США: ближе NJ или Houston, $1 = 1 миля."}
+                  : isCopartUs
+                    ? "Аукционные сборы — официальная сетка Copart USA для licensed business и secured payment. 12+ авто недостаточно для High Volume в США."
+                    : "Аукционные сборы — как на аккаунте IAAI (Standard по умолчанию). До разборки США: ближе NJ или Houston, $1 = 1 миля."}
               </p>
               {lot ? (
                 <div className="facts">
@@ -548,7 +550,7 @@ export default function IaaiCalculator({
                   </label>
                 </div>
 
-                <label className="hint">Тип покупателя IAAI</label>
+                <label className="hint">Тип покупателя {isCopartUs ? "Copart USA" : "IAAI"}</label>
                 <div className="segment">
                   <label className="check">
                     <input type="radio" checked={volume === "standard"} onChange={() => setVolume("standard")} />
@@ -556,7 +558,7 @@ export default function IaaiCalculator({
                   </label>
                   <label className="check">
                     <input type="radio" checked={volume === "high"} onChange={() => setVolume("high")} />
-                    High Volume (опт)
+                    {isCopartUs ? "High Volume (25+ авто и $75k+/год)" : "High Volume (опт)"}
                   </label>
                 </div>
               </>

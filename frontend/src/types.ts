@@ -63,10 +63,14 @@ export interface IaaiFees {
   iaai_total: number;
   auction_fees_usd?: number | null;
   fees_source?: "bidcars" | "iaai" | string | null;
+  service_fee_label?: string | null;
+  title_group?: "clean" | "non_clean" | string | null;
+  title_group_label?: string | null;
+  payment_method?: string | null;
 }
 
 export interface IaaiQuote {
-  auction: "iaai";
+  auction: "iaai" | "copart" | string;
   purpose?: "iaai" | "restoration" | string;
   vehicle_size?: string | null;
   vehicle_size_label?: string | null;

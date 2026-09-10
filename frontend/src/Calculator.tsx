@@ -125,10 +125,10 @@ function lotPhotos(lot: LotDetails | null) {
   return copartPhotoUrls(lot?.images, 2);
 }
 
-/** Bid.cars / IAAI ссылка → USA расчёт, иначе Copart UK. */
+/** Copart.com / Bid.cars / IAAI → USA, Copart.co.uk и номер лота → UK. */
 function detectSource(value: string): "copart" | "iaai" {
   const v = value.trim().toLowerCase();
-  if (/(?:^|\/\/|\.)bid\.cars\b|iaai\.com\b/i.test(v)) return "iaai";
+  if (/(?:^|\/\/|\.)bid\.cars\b|iaai\.com\b|copart\.com\b/i.test(v)) return "iaai";
   return "copart";
 }
 
@@ -190,7 +190,7 @@ function HistoryPanel({
                   {historyPhoto ? <img src={historyPhoto} alt="" loading="lazy" /> : null}
                   <div className="calc-history-body">
                     <b>{item.title || `Lot ${item.lot_id}`}</b>
-                    <small>{auction === "iaai" ? "Bid.cars / IAAI" : "Copart UK"}</small>
+                    <small>{auction === "iaai" ? "Аукцион USA" : "Copart UK"}</small>
                     <small>
                       {item.bid != null ? `Ставка ${auction === "iaai" ? usd(item.bid) : money(item.bid)}` : "—"}
                       {item.total_uk != null ? ` · UK ${money(item.total_uk)}` : ""}
@@ -539,7 +539,7 @@ export default function Calculator() {
 
               onChange={(e) => changeUrl(e.target.value)}
 
-              placeholder="Ссылка Copart UK / Bid.cars или номер лота"
+              placeholder="Ссылка Copart UK / Copart USA / IAAI / Bid.cars или номер лота"
 
               required
 

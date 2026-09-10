@@ -399,6 +399,7 @@ export function IaaiQuoteBox({ quote }: { quote: IaaiQuote }) {
   const fees = quote.iaai;
   const usa = quote.delivery_usa;
   const isRestoration = quote.purpose === "restoration";
+  const isCopartUs = fees.auction === "copart" || fees.fees_source === "copart_us";
   const feesFromBidcars = fees.fees_source === "bidcars" || fees.auction_fees_usd != null;
   const baseUsa = quote.subtotal_usa ?? (usa?.america_subtotal_usd ?? fees.iaai_total);
   const totalUsa =
@@ -411,12 +412,15 @@ export function IaaiQuoteBox({ quote }: { quote: IaaiQuote }) {
       <div className="quote-caption">
         {isRestoration
           ? `Расчёт под восстановление${sizeLabel ? ` — ${sizeLabel}` : ""}`
-          : `Расчёт IAAI USA — ${fees.volume_label || "Standard"}`}
+          : `Расчёт ${isCopartUs ? "Copart USA" : "IAAI USA"} — ${fees.volume_label || "Standard"}`}
       </div>
       {feesFromBidcars ? (
         <div className="quote-vat-note">Аукционные сборы с Bid.cars</div>
       ) : (
-        <div className="quote-vat-note">{fees.volume_label} · {fees.bid_method === "live" ? "Live online" : "Proxy"}</div>
+        <div className="quote-vat-note">
+          {fees.volume_label} · {fees.title_group_label ? `${fees.title_group_label} · ` : ""}
+          {fees.bid_method === "live" ? "Live online" : "Proxy"}
+        </div>
       )}
       <QuoteRow label="Bid Amount" value={usd(fees.bid, 2)} />
       {feesFromBidcars ? (
@@ -446,9 +450,9 @@ export function IaaiQuoteBox({ quote }: { quote: IaaiQuote }) {
             hint={fees.bid_method === "live" ? "Live online" : "Proxy / pre-bid"}
             value={usd(fees.virtual_bid, 2)}
           />
-          <QuoteRow label="Service Fee" value={usd(fees.service_fee, 2)} />
+          <QuoteRow label={fees.service_fee_label || "Service Fee"} value={usd(fees.service_fee, 2)} />
           <QuoteRow label="Environmental Fee" value={usd(fees.environmental_fee, 2)} />
-          <QuoteRow label="Title Handling Fee" value={usd(fees.title_fee, 2)} />
+          {fees.title_fee > 0 ? <QuoteRow label="Title Handling Fee" value={usd(fees.title_fee, 2)} /> : null}
           <QuoteRow label="Estimated Final Cost" value={usd(fees.iaai_total, 2)} total />
         </>
       )}
