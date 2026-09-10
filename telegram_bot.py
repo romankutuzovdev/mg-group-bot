@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import urllib.error
 
 from notify import get_bot_username, send_message_safe, telegram_call
 from store import LotStore
@@ -144,6 +145,23 @@ def poll_telegram(store: LotStore, get_token) -> None:
                 },
                 timeout=40,
             )
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                store.set_meta("telegram_poll_ok", "0")
+                store.set_meta(
+                    "telegram_poll_error",
+                    "Конфликт: тот же бот уже слушает getUpdates на другом компьютере/процессе. "
+                    "Оставьте один app.py или перевыпустите токен у @BotFather.",
+                )
+                log.warning(
+                    "Telegram: уже крутится другой getUpdates (второй app.py?). "
+                    "Оставьте один бэкенд — вход/уведомления работают только у него."
+                )
+                time.sleep(8)
+                continue
+            log.exception("Telegram getUpdates HTTP %s", exc.code)
+            time.sleep(4)
+            continue
         except Exception:
             log.exception("Telegram getUpdates")
             time.sleep(4)
@@ -152,6 +170,8 @@ def poll_telegram(store: LotStore, get_token) -> None:
             log.error("Telegram getUpdates: %s", body)
             time.sleep(4)
             continue
+        store.set_meta("telegram_poll_ok", "1")
+        store.set_meta("telegram_poll_error", "")
         for update in body.get("result") or []:
             update_id = int(update["update_id"])
             store.set_meta("telegram_offset", str(update_id + 1))

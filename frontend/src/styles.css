@@ -43,20 +43,29 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 24px;
+  gap: 16px;
   padding: 0 24px;
-  height: 64px;
+  min-height: 64px;
+  height: auto;
+  flex-wrap: wrap;
   background: #fff;
   border-bottom: 1px solid var(--border);
 }
-.topnav { display: flex; gap: 8px; }
+.topnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
 .nav-link {
   color: var(--muted);
   text-decoration: none;
   font-weight: 600;
-  font-size: 14px;
-  padding: 8px 14px;
+  font-size: 13px;
+  padding: 8px 12px;
   border-radius: 8px;
+  white-space: nowrap;
 }
 .nav-link:hover { background: var(--primary-soft); color: var(--cta); }
 .nav-link.active { background: var(--cta); color: #fff; }
@@ -241,6 +250,26 @@ h2 {
   align-items: flex-start;
   margin-bottom: 10px;
   flex-shrink: 0;
+}
+.calc-toolbar.calc-toolbar-title {
+  justify-content: flex-start;
+}
+.calc-page-heading {
+  min-width: 0;
+  max-width: 640px;
+}
+.calc-page-title {
+  margin: 0 0 4px;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  color: inherit;
+  text-transform: none;
+}
+.calc-page-sub {
+  margin: 0;
+  max-width: 52ch;
 }
 .calc-toolbar .fx-control {
   min-width: 0;
@@ -662,7 +691,52 @@ h2 {
   margin-bottom: 2px;
 }
 .check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin: 6px 0; }
-.segment { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 4px; }
+.segment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 6px 0 12px;
+}
+.segment .check {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-width: 88px;
+  min-height: 44px;
+  padding: 8px 14px;
+  margin: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 92%, var(--bg));
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.segment .check:hover {
+  border-color: color-mix(in srgb, var(--accent, #2563eb) 55%, var(--border));
+}
+.segment .check:has(input:checked) {
+  border-color: var(--accent, #2563eb);
+  background: color-mix(in srgb, var(--accent, #2563eb) 14%, var(--card));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, #2563eb) 35%, transparent);
+  color: var(--text);
+}
+.segment .check input[type="radio"],
+.segment .check input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  pointer-events: none;
+}
 .calc-panel .hint { display: block; margin: 8px 0 4px; }
 .calc-panel .quote-box {
   margin: 8px 0 10px;
@@ -674,6 +748,78 @@ h2 {
 .calc-panel .quote-row.total span,
 .calc-panel .quote-row.total b {
   font-size: 14px;
+}
+
+.price-sheet {
+  margin: 10px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 88%, var(--bg));
+  overflow: hidden;
+}
+.price-sheet-summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+.price-sheet-summary::-webkit-details-marker { display: none; }
+.price-sheet-summary::before {
+  content: "▸";
+  color: var(--muted);
+  margin-right: 2px;
+  transition: transform 0.15s ease;
+}
+.price-sheet[open] > .price-sheet-summary::before {
+  transform: rotate(90deg);
+}
+.price-sheet-summary-meta {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+.price-sheet-body {
+  padding: 0 12px 12px;
+  border-top: 1px solid var(--border);
+}
+.price-sheet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 8px;
+}
+.price-sheet-table th,
+.price-sheet-table td {
+  text-align: left;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.price-sheet-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+}
+.price-sheet-table tr.is-selected td {
+  background: color-mix(in srgb, var(--accent, #2f6fed) 12%, transparent);
+  font-weight: 600;
+}
+.price-sheet-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent, #2f6fed);
+  background: color-mix(in srgb, var(--accent, #2f6fed) 14%, transparent);
 }
 
 .bamper-box {
@@ -848,4 +994,18 @@ h2 {
   border-radius: var(--radius);
   padding: 14px 16px;
   box-shadow: var(--shadow);
+}
+.customs-by {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+}
+.customs-by .segment {
+  flex-wrap: wrap;
+}
+.customs-by .segment .check {
+  min-width: 96px;
+  min-height: 48px;
+  flex: 1 1 96px;
+  max-width: 140px;
 }

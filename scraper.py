@@ -400,6 +400,10 @@ def materialize_lot_images(page: Any, lot_id: str, urls: list[str], *, limit: in
     cleaned = _uniq_images(preferred)
     if not cleaned:
         return []
+    try:
+        limit = max(1, int(os.getenv("LOT_IMAGE_LIMIT", str(limit)) or limit))
+    except ValueError:
+        pass
     out_dir = DATA_DIR / "lot-images"
     out_dir.mkdir(parents=True, exist_ok=True)
     local: list[str] = []
@@ -421,7 +425,6 @@ def materialize_lot_images(page: Any, lot_id: str, urls: list[str], *, limit: in
         local.append(f"/api/media/lot/{lot_id}/{index}")
         log.info("Сохранил фото лота %s #%s (%s байт)", lot_id, index, len(body))
     return local
-
 
 def _harvest_images_from_page(page: Any, lot_id: str) -> list[str]:
     """Добирает URL фото с открытой страницы лота (галерея может подгрузиться позже)."""
@@ -551,12 +554,52 @@ def _screenshot_lot_images(page: Any, lot_id: str, *, limit: int = 2, start_inde
 
 
 def _attach_lot_images(page: Any, lot_id: str, details: dict) -> dict:
-    """Фото необязательны: ошибка CDN не должна ронять карточку лота."""
+    """Фото необязательны: ошибка CDN не должна ронять карточку лота.
+
+    LOT_KEEP_CDN_IMAGES=1 — не скачивать, оставить прямые URL Copart CDN.
+    """
     try:
         urls = list(details.get("images") or [])
-        if not urls:
-            urls = _harvest_images_from_page(page, lot_id)
-        details["images"] = materialize_lot_images(page, lot_id, urls, limit=2)
+        keep_cdn = os.getenv("LOT_KEEP_CDN_IMAGES", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if keep_cdn:
+            # Галерея часто догружается после JSON — подождём и снимем DOM
+            try:
+                page.wait_for_timeout(900)
+            except Exception:
+                pass
+            try:
+                page.evaluate("() => window.scrollBy(0, 450)")
+            except Exception:
+                pass
+            harvested = _harvest_images_from_page(page, lot_id)
+            urls = list(urls) + list(harvested)
+            # клик по миниатюрам, чтобы подтянуть ещё URL
+            try:
+                thumbs = page.locator(
+                    "img[src*='_thb'], img[src*='_ful'], img[src*='AUTH_svc'], img[src*='ids-c-prod']"
+                )
+                n = min(thumbs.count(), 8)
+                for i in range(n):
+                    try:
+                        thumbs.nth(i).click(timeout=800)
+                        page.wait_for_timeout(120)
+                    except Exception:
+                        continue
+                urls = list(urls) + list(_harvest_images_from_page(page, lot_id))
+            except Exception:
+                pass
+            preferred = [str(u or "").strip().replace("_thb.", "_ful.") for u in urls]
+            details["images"] = _uniq_images(preferred)
+            log.info("Лот %s: CDN-фото %s шт.", lot_id, len(details["images"]))
+        else:
+            if not urls:
+                urls = _harvest_images_from_page(page, lot_id)
+            details["images"] = materialize_lot_images(page, lot_id, urls, limit=2)
     except Exception as exc:
         log.info("Лот %s: фото пропущены (%s)", lot_id, exc)
         details["images"] = []
@@ -650,10 +693,69 @@ def _popen(args: list[str]) -> None:
     subprocess.Popen(args, **kwargs)
 
 
+def _bot_chrome_user_data() -> Path:
+    """Отдельный профиль Chrome для CDP — не мешает обычному браузеру пользователя."""
+    path = Path(__file__).resolve().parent / "data" / "chrome-cdp-profile"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _quit_chrome_macos() -> None:
+    """Закрыть Chrome на Mac, чтобы перезапустить с remote debugging."""
+    try:
+        subprocess.run(
+            ["osascript", "-e", 'tell application "Google Chrome" to quit'],
+            capture_output=True,
+            timeout=15,
+        )
+    except Exception:
+        pass
+    for _ in range(20):
+        if not _chrome_running():
+            return
+        time.sleep(0.4)
+
+
+def _launch_chrome_cdp() -> None:
+    """Открыть Chrome с --remote-debugging-port=9222 (нужно для Playwright/CDP)."""
+    exe = _chrome_exe()
+    if exe is None:
+        raise RuntimeError("Не найден Google Chrome")
+    if _port_open(DEFAULT_CDP_PORT):
+        return
+
+    user_data = _bot_chrome_user_data()
+    args = [
+        str(exe),
+        f"--remote-debugging-port={DEFAULT_CDP_PORT}",
+        "--remote-allow-origins=*",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--user-data-dir={user_data}",
+        "https://bid.cars/en",
+    ]
+    log.info(
+        "Запускаю Chrome (профиль бота) с remote debugging на порту %s",
+        DEFAULT_CDP_PORT,
+    )
+    _popen(args)
+    for _ in range(60):
+        if _port_open(DEFAULT_CDP_PORT):
+            log.info("Chrome remote debugging готов (порт %s)", DEFAULT_CDP_PORT)
+            return
+        time.sleep(0.25)
+    log.warning(
+        "Порт %s ещё не открылся. Откройте %s и нажмите Allow.",
+        DEFAULT_CDP_PORT,
+        INSPECT_URL,
+    )
+
+
 def _chrome_executables() -> list[Path]:
     local = Path(os.environ.get("LOCALAPPDATA", ""))
     pf = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
     pf86 = Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+    home = Path.home()
     return [
         pf / "Google/Chrome/Application/chrome.exe",
         local / "Google/Chrome/Application/chrome.exe",
@@ -661,6 +763,10 @@ def _chrome_executables() -> list[Path]:
         pf / "Microsoft/Edge/Application/msedge.exe",
         pf86 / "Microsoft/Edge/Application/msedge.exe",
         local / "Microsoft/Edge/Application/msedge.exe",
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"),
+        Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        home / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ]
 
 
@@ -673,10 +779,16 @@ def _chrome_exe() -> Path | None:
 
 def _user_data_dirs() -> list[Path]:
     local = Path(os.environ.get("LOCALAPPDATA", ""))
+    home = Path.home()
     return [
         local / "Google/Chrome/User Data",
         local / "Google/Chrome Beta/User Data",
         local / "Microsoft/Edge/User Data",
+        home / "Library/Application Support/Google/Chrome",
+        home / "Library/Application Support/Google/Chrome Beta",
+        home / "Library/Application Support/Microsoft Edge",
+        Path(__file__).resolve().parent / "data" / "chrome-profile",
+        Path(__file__).resolve().parent / "data" / "chrome-profile-export",
     ]
 
 
@@ -697,8 +809,17 @@ def _image_running(name: str) -> bool:
 
 
 def _chrome_running() -> bool:
-    return _image_running("chrome.exe") or _image_running("msedge.exe")
-
+    if os.name == "nt":
+        return _image_running("chrome.exe") or _image_running("msedge.exe")
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "Google Chrome|Chromium|Microsoft Edge"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 def _port_open(port: int) -> bool:
     try:
@@ -733,30 +854,56 @@ def _cdp_endpoints() -> list[str]:
 
     env = os.getenv("CHROME_CDP_URL", "").strip()
     if env:
-        add(env)
-    for data_dir in _user_data_dirs():
+        # Env может указывать на мёртвый ws — проверяем порт, если это localhost
+        try:
+            from urllib.parse import urlparse
+
+            parsed_env = urlparse(env)
+            host = (parsed_env.hostname or "").lower()
+            port = parsed_env.port or (443 if parsed_env.scheme == "wss" else 80)
+            if host in {"127.0.0.1", "localhost"} and not _port_open(int(port)):
+                log.warning(
+                    "CHROME_CDP_URL=%s, но порт %s закрыт — remote debugging выключен",
+                    env[:80],
+                    port,
+                )
+            else:
+                add(env)
+        except Exception:
+            add(env)
+    for data_dir in _user_data_dirs() + [_bot_chrome_user_data()]:
         parsed = _read_devtools_active_port(data_dir)
         if not parsed:
             continue
         port, ws_path = parsed
-        add(f"http://127.0.0.1:{port}")
+        # Старый DevToolsActivePort без живого порта — не долбим ECONNREFUSED
+        if not _port_open(port):
+            continue
+        # Новый Chrome remote-debugging часто отвечает только по ws://, http /json даёт 404
         if ws_path:
             path = ws_path if ws_path.startswith("/") else f"/{ws_path}"
             add(f"ws://127.0.0.1:{port}{path}")
+        add(f"http://127.0.0.1:{port}")
     if _port_open(DEFAULT_CDP_PORT):
+        # Сначала ws из DevToolsActivePort профиля бота / пользователя
+        for data_dir in _user_data_dirs() + [_bot_chrome_user_data()]:
+            parsed = _read_devtools_active_port(data_dir)
+            if not parsed:
+                continue
+            port, ws_path = parsed
+            if port != DEFAULT_CDP_PORT or not ws_path:
+                continue
+            path = ws_path if ws_path.startswith("/") else f"/{ws_path}"
+            add(f"ws://127.0.0.1:{port}{path}")
+        # Playwright умеет http://127.0.0.1:9222 даже когда /json/version → 404
         add(f"http://127.0.0.1:{DEFAULT_CDP_PORT}")
     return found
 
 
 def _ensure_user_chrome() -> None:
-    if _chrome_running():
+    if _port_open(DEFAULT_CDP_PORT):
         return
-    exe = _chrome_exe()
-    if exe is None:
-        raise RuntimeError("Не найден Chrome. Откройте браузер сами и повторите.")
-    log.info("Открываю ваш обычный Chrome")
-    _popen([str(exe)])
-    time.sleep(2.5)
+    _launch_chrome_cdp()
 
 
 def _open_inspect_page() -> None:
@@ -1603,6 +1750,9 @@ class ScrapeService:
         self._monitor_page: Any = None
         self._lot_page: Any = None
         self._bidcars_page: Any = None
+        self._copart_us_page: Any = None
+        self._iaai_page: Any = None
+        self._ny_dmv_page: Any = None
         self._maps_page: Any = None
         self._json_target: list[dict] = []
         self._json_hook_pages: set[int] = set()
@@ -1667,6 +1817,75 @@ class ScrapeService:
             with self._lot_waiters_lock:
                 self.lot_waiters = max(0, self.lot_waiters - 1)
 
+    def fetch_copart_us_lot(self, url: str) -> dict:
+        with self._lot_waiters_lock:
+            self.lot_waiters += 1
+        try:
+            return self._run_job({"kind": "copart_us_lot", "url": url}, timeout=180)
+        finally:
+            with self._lot_waiters_lock:
+                self.lot_waiters = max(0, self.lot_waiters - 1)
+
+    def fetch_iaai_lot(self, url: str) -> dict:
+        with self._lot_waiters_lock:
+            self.lot_waiters += 1
+        try:
+            return self._run_job({"kind": "iaai_lot", "url": url}, timeout=240)
+        finally:
+            with self._lot_waiters_lock:
+                self.lot_waiters = max(0, self.lot_waiters - 1)
+
+    def fetch_usa_lot(self, url: str) -> dict:
+        """Роутер: Copart.com / IAAI.com / Bid.cars."""
+        from usa_auction import detect_usa_source
+
+        kind = detect_usa_source(url)
+        if kind == "copart":
+            return self.fetch_copart_us_lot(url)
+        if kind == "iaai":
+            return self.fetch_iaai_lot(url)
+        if kind == "bidcars":
+            return self.fetch_bidcars_lot(url)
+        raise ValueError(
+            "Нужна ссылка Copart.com, IAAI.com или Bid.cars на лот"
+        )
+
+    def check_ny_lien(self, *, vin: str, year: int | str, make: str) -> dict:
+        with self._lot_waiters_lock:
+            self.lot_waiters += 1
+        try:
+            return self._run_job(
+                {"kind": "ny_dmv_lien", "vin": vin, "year": year, "make": make},
+                timeout=120,
+            )
+        finally:
+            with self._lot_waiters_lock:
+                self.lot_waiters = max(0, self.lot_waiters - 1)
+
+    def check_usa_sublot(
+        self,
+        *,
+        auction_url: str | None = None,
+        auction_platform: str | None = None,
+        lot_id: str | None = None,
+    ) -> dict:
+        """Асинхронная проверка Copart Sublot / IAAI Offsite (+$100) после показа цены."""
+        with self._lot_waiters_lock:
+            self.lot_waiters += 1
+        try:
+            return self._run_job(
+                {
+                    "kind": "usa_sublot",
+                    "auction_url": auction_url,
+                    "auction_platform": auction_platform,
+                    "lot_id": lot_id,
+                },
+                timeout=180,
+            ) or {"is_sublot": False, "sublot_location": None}
+        finally:
+            with self._lot_waiters_lock:
+                self.lot_waiters = max(0, self.lot_waiters - 1)
+
     def fetch_bidcars_search(self, searches: list[tuple[str, str]], page_limit: int) -> list[dict]:
         return self._run_job(
             {"kind": "bidcars_search", "searches": searches, "page_limit": page_limit},
@@ -1679,6 +1898,10 @@ class ScrapeService:
         priority_by_kind = {
             "lot": 0,
             "bidcars_lot": 0,
+            "copart_us_lot": 0,
+            "iaai_lot": 0,
+            "usa_sublot": 0,
+            "ny_dmv_lien": 0,
             "image": 1,
             "google_miles": 2,
         }
@@ -1687,9 +1910,9 @@ class ScrapeService:
         self._queue.put((priority, self._next_job_seq(), job))
         if not done.wait(timeout=timeout):
             kind = payload.get("kind")
-            if kind in {"bidcars_lot", "bidcars_search"}:
+            if kind in {"bidcars_lot", "bidcars_search", "copart_us_lot", "iaai_lot", "usa_sublot", "ny_dmv_lien"}:
                 raise CopartBlockedError(
-                    "Bid.cars слишком долго отвечает — Chrome занят мониторингом Copart. Подождите и нажмите ещё раз."
+                    "USA-лот слишком долго отвечает — подождите и нажмите ещё раз."
                 )
             raise CopartBlockedError("Copart слишком долго отвечает")
         if job["error"]:
@@ -1739,10 +1962,17 @@ class ScrapeService:
             except queue.Empty:
                 break
             kind = (job or {}).get("kind")
-            if not job or kind not in {"lot", "bidcars_lot"}:
+            if not job or kind not in {"lot", "bidcars_lot", "copart_us_lot", "iaai_lot", "usa_sublot", "ny_dmv_lien"}:
                 self._queue.put((priority, seq, job))
                 break
-            log.info("Пауза мониторинга — срочно открываю %s", "Bid.cars" if kind == "bidcars_lot" else "лот Copart")
+            label = {
+                "bidcars_lot": "Bid.cars",
+                "copart_us_lot": "Copart USA",
+                "iaai_lot": "IAAI",
+                "usa_sublot": "Sublot/Offsite",
+                "ny_dmv_lien": "NY DMV залог",
+            }.get(kind, "лот Copart")
+            log.info("Пауза мониторинга — срочно открываю %s", label)
             try:
                 job["result"] = self._run_browser_job(job)
             except Exception as exc:
@@ -1784,18 +2014,84 @@ class ScrapeService:
                 dict(job.get("destinations") or {}),
             )
         if kind == "bidcars_lot":
-            from bidcars import extract_bidcars_lot, normalize_bidcars_url, parse_bidcars_lot_id
+            from bidcars import (
+                extract_bidcars_lot,
+                normalize_bidcars_url,
+                parse_bidcars_lot_id,
+                prefer_bidcars_cdn_images,
+            )
 
             canonical = normalize_bidcars_url(job["url"])
             page = self._ensure_bidcars_tab(canonical)
             details = extract_bidcars_lot(page, canonical)
             lot_id = str(details.get("lot_id") or parse_bidcars_lot_id(canonical) or "0")
-            try:
-                details["images"] = materialize_usa_images(page, lot_id, details.get("images") or [])
-            except Exception as exc:
-                log.info("Bid.cars %s: фото пропущены (%s)", lot_id, exc)
-                details["images"] = []
+            # Берём CDN Bid.cars напрямую — без локального скачивания (оно часто обнуляло фото)
+            cdn = prefer_bidcars_cdn_images(details.get("images") or [], limit=6)
+            if cdn:
+                details["images"] = cdn
+                log.info("Bid.cars %s: CDN-фото %s шт.", lot_id, len(cdn))
+            else:
+                try:
+                    details["images"] = materialize_usa_images(
+                        page, lot_id, details.get("images") or [], limit=2
+                    )
+                except Exception as exc:
+                    log.info("Bid.cars %s: фото пропущены (%s)", lot_id, exc)
+                    details["images"] = []
+            # Sublot/Offsite — не блокируем lookup; проверка отдельно после показа цены
             return details
+        if kind == "copart_us_lot":
+            from usa_auction import extract_copart_us_lot, normalize_copart_us_url, parse_copart_us_lot_id
+
+            canonical = normalize_copart_us_url(job["url"])
+            page = self._ensure_copart_us_tab(canonical, focus=True)
+            details = extract_copart_us_lot(page, canonical)
+            lot_id = str(details.get("lot_id") or parse_copart_us_lot_id(canonical) or "0")
+            log.info(
+                "Copart USA %s: %s, фото %s, title=%s",
+                lot_id,
+                details.get("title"),
+                len(details.get("images") or []),
+                details.get("documents"),
+            )
+            return details
+        if kind == "iaai_lot":
+            from usa_auction import extract_iaai_lot, normalize_iaai_url, parse_iaai_stock_id
+
+            canonical = normalize_iaai_url(job["url"])
+            page = self._ensure_iaai_tab(canonical, focus=True)
+            details = extract_iaai_lot(page, canonical)
+            lot_id = str(details.get("lot_id") or parse_iaai_stock_id(canonical) or "0")
+            log.info(
+                "IAAI %s: %s, фото %s, Title/Sale Doc=%s",
+                lot_id,
+                details.get("title"),
+                len(details.get("images") or []),
+                details.get("documents"),
+            )
+            return details
+        if kind == "usa_sublot":
+            return self._check_usa_sublot_job(
+                auction_url=str(job.get("auction_url") or "") or None,
+                auction_platform=str(job.get("auction_platform") or "") or None,
+                lot_id=str(job.get("lot_id") or "") or None,
+            )
+        if kind == "ny_dmv_lien":
+            from ny_dmv import check_title_status
+
+            page = self._ensure_ny_dmv_tab()
+            result = check_title_status(
+                page,
+                vin=str(job.get("vin") or ""),
+                year=job.get("year") or "",
+                make=str(job.get("make") or ""),
+            )
+            log.info(
+                "NY DMV lien VIN=%s → %s",
+                result.get("vin"),
+                result.get("summary"),
+            )
+            return result
         if kind == "bidcars_search":
             from bidcars import extract_bidcars_search
 
@@ -1894,6 +2190,117 @@ class ScrapeService:
             CopartScraper([], headless=self.headless)._safe_goto(page, target)
         return page
 
+    def _check_usa_sublot_job(
+        self,
+        *,
+        auction_url: str | None = None,
+        auction_platform: str | None = None,
+        lot_id: str | None = None,
+    ) -> dict:
+        """Открыть Copart/IAAI по ссылке с Bid.cars и проверить Sublot/Offsite."""
+        from usa_auction import normalize_copart_us_url, normalize_iaai_url
+
+        lot_id = str(lot_id or "").strip()
+        bare = lot_id.split("-")[-1] if lot_id else ""
+        aurl = str(auction_url or "").strip()
+        platform = str(auction_platform or "").strip().lower()
+        if platform not in {"copart", "iaai"}:
+            if "copart.com" in aurl.lower():
+                platform = "copart"
+            elif "iaai.com" in aurl.lower():
+                platform = "iaai"
+            elif lot_id.startswith("0-") or lot_id.startswith("1-"):
+                platform = "iaai"
+            else:
+                platform = "copart"
+
+        # Search?Keyword=45446905 → VehicleDetail/45446905~US
+        if platform == "iaai" and aurl:
+            import re
+
+            m = re.search(r"[?&]Keyword=(\d+)", aurl, re.I)
+            if m:
+                aurl = normalize_iaai_url(f"https://www.iaai.com/VehicleDetail/{m.group(1)}~US")
+            else:
+                aurl = normalize_iaai_url(aurl)
+        elif platform == "copart" and aurl:
+            aurl = normalize_copart_us_url(aurl)
+        elif platform == "copart" and bare.isdigit():
+            aurl = normalize_copart_us_url(f"https://www.copart.com/lot/{bare}")
+        elif platform == "iaai" and bare.isdigit():
+            aurl = normalize_iaai_url(f"https://www.iaai.com/VehicleDetail/{bare}~US")
+        else:
+            return {
+                "is_sublot": False,
+                "sublot_location": None,
+                "auction_platform": platform,
+                "auction_url": aurl or None,
+                "checked": False,
+                "error": "нет ссылки на аукцион",
+            }
+
+        auction: dict | None = None
+        if platform == "copart":
+            page = self._ensure_copart_us_tab(aurl, focus=False)
+            from usa_auction import extract_copart_us_lot
+
+            auction = extract_copart_us_lot(page, aurl)
+        else:
+            page = self._ensure_iaai_tab(aurl, focus=False)
+            from usa_auction import extract_iaai_lot
+
+            auction = extract_iaai_lot(page, aurl)
+
+        if not auction:
+            return {
+                "is_sublot": False,
+                "sublot_location": None,
+                "auction_platform": platform,
+                "auction_url": aurl,
+                "checked": False,
+                "error": "не удалось прочитать лот",
+            }
+        is_sublot = bool(auction.get("is_sublot"))
+        loc = auction.get("sublot_location")
+        log.info(
+            "Sublot check %s → %s: %s %s",
+            lot_id or bare,
+            platform,
+            "Sublot/Offsite" if is_sublot else "нет",
+            loc or "",
+        )
+        return {
+            "is_sublot": is_sublot,
+            "sublot_location": loc,
+            "auction_platform": platform,
+            "auction_url": auction.get("url") or aurl,
+            "checked": True,
+            "documents": auction.get("documents"),
+            "title_code": auction.get("title_code"),
+            "engine": auction.get("engine"),
+            "fuel": auction.get("fuel"),
+            "year": auction.get("year"),
+            "location": auction.get("location"),
+        }
+
+    def _enrich_bidcars_sublot(self, details: dict) -> dict:
+        """С Bid.cars открываем Copart/IAAI и смотрим Sublot / Offsite (+$100)."""
+        result = self._check_usa_sublot_job(
+            auction_url=str(details.get("auction_url") or "") or None,
+            auction_platform=str(details.get("auction_platform") or "") or None,
+            lot_id=str(details.get("lot_id") or "") or None,
+        )
+        if result.get("auction_platform"):
+            details["auction_platform"] = result["auction_platform"]
+        if result.get("auction_url"):
+            details["auction_url"] = result["auction_url"]
+        details["is_sublot"] = bool(result.get("is_sublot"))
+        details["sublot_location"] = result.get("sublot_location")
+        for key in ("documents", "title_code", "engine", "fuel", "year", "location"):
+            if not details.get(key) and result.get(key):
+                details[key] = result[key]
+        return details
+
     def _ensure_bidcars_tab(self, url: str) -> Any:
         self._ensure_browser()
         page = self._bidcars_page
@@ -1905,7 +2312,75 @@ class ScrapeService:
             page = self._context.new_page()
             self._bidcars_page = page
             log.info("Создал вкладку Bid.cars")
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
         # Сам переход делает extract_bidcars_lot: полный document load, не SPA.
+        return page
+
+    def _ensure_copart_us_tab(self, url: str, *, focus: bool = True) -> Any:
+        """Отдельная вкладка Copart.com — как lot-вкладка в калькуляторе."""
+        self._ensure_browser()
+        page = self._copart_us_page
+        if not self._tab_alive(page):
+            contexts = list(self._browser.contexts) if self._browser else []
+            if not contexts:
+                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
+            self._context = contexts[0]
+            page = self._context.new_page()
+            self._copart_us_page = page
+            log.info("Создал вкладку Copart USA")
+        if focus:
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+        target = (url or "").strip()
+        if not target:
+            return page
+        current = (page.url or "").strip()
+        from usa_auction import parse_copart_us_lot_id
+
+        target_lot = parse_copart_us_lot_id(target)
+        current_lot = parse_copart_us_lot_id(current)
+        if target_lot and target_lot == current_lot and "/lot/" in current.lower():
+            return page
+        if current.rstrip("/").lower() != target.rstrip("/").lower():
+            log.info("Открываю в Chrome (copart_us): %s", target)
+            CopartScraper([], headless=self.headless)._safe_goto(page, target)
+        return page
+
+    def _ensure_iaai_tab(self, url: str, *, focus: bool = True) -> Any:
+        """Отдельная вкладка IAAI.com — как lot-вкладка в калькуляторе."""
+        self._ensure_browser()
+        page = self._iaai_page
+        if not self._tab_alive(page):
+            contexts = list(self._browser.contexts) if self._browser else []
+            if not contexts:
+                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
+            self._context = contexts[0]
+            page = self._context.new_page()
+            self._iaai_page = page
+            log.info("Создал вкладку IAAI")
+        if focus:
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
+        target = (url or "").strip()
+        if not target:
+            return page
+        current = (page.url or "").strip()
+        from usa_auction import parse_iaai_stock_id
+
+        target_id = parse_iaai_stock_id(target)
+        current_id = parse_iaai_stock_id(current)
+        if target_id and target_id == current_id and "vehicledetail" in current.lower():
+            return page
+        if current.rstrip("/").lower() != target.rstrip("/").lower():
+            log.info("Открываю в Chrome (iaai): %s", target)
+            CopartScraper([], headless=self.headless)._safe_goto(page, target)
         return page
 
     def _ensure_maps_tab(self) -> Any:
@@ -1966,7 +2441,11 @@ class ScrapeService:
             timeout = 90_000 if index == 0 else 20_000
             try:
                 log.info("Подключаюсь к уже открытому Chrome")
-                self._browser = self._pw.chromium.connect_over_cdp(url, timeout=timeout)
+                self._browser = self._pw.chromium.connect_over_cdp(
+                    url,
+                    timeout=timeout,
+                    no_defaults=True,
+                )
                 self._pick_page()
                 self._monitor_warmed = False
                 log.info("Две вкладки Copart: мониторинг и лоты — другие вкладки не трогаю.")
@@ -1978,6 +2457,8 @@ class ScrapeService:
                 self._monitor_page = None
                 self._lot_page = None
                 self._bidcars_page = None
+                self._copart_us_page = None
+                self._iaai_page = None
                 self._maps_page = None
                 self._json_hook_pages.clear()
         raise last_error or RuntimeError("Не удалось подключиться к Chrome")
@@ -1988,6 +2469,12 @@ class ScrapeService:
         last_error = None
         deadline = time.time() + 240
         while time.time() < deadline:
+            if not _port_open(DEFAULT_CDP_PORT):
+                try:
+                    _ensure_user_chrome()
+                except Exception as exc:
+                    last_error = exc
+                    log.warning("Не удалось запустить Chrome: %s", exc)
             endpoints = _cdp_endpoints()
             if endpoints:
                 self._pw = sync_playwright().start()
@@ -1998,29 +2485,28 @@ class ScrapeService:
                     last_error = exc
                     self._close_browser()
                     log.warning("Chrome не пустил к окну (%s). Если всплыло Allow — нажмите.", exc)
-                    time.sleep(8)
+                    time.sleep(5)
                     continue
-            try:
-                _ensure_user_chrome()
-            except Exception as exc:
-                last_error = exc
             if not prompted:
                 _open_inspect_page()
                 log.warning(
-                    "Нужен ваш обычный Chrome, второе окно не открою. "
-                    "Откройте вкладку %s, включите Remote debugging и нажмите Allow.",
+                    "Chrome remote debugging выключен (порт %s закрыт). "
+                    "Откройте %s → Allow remote debugging, затем повторите.",
+                    DEFAULT_CDP_PORT,
                     INSPECT_URL,
                 )
                 prompted = True
             time.sleep(2)
         raise last_error or RuntimeError(
-            f"Не удалось подключиться к Chrome. Откройте {INSPECT_URL}, включите отладку и нажмите Allow."
+            f"Chrome remote debugging выключен. Откройте {INSPECT_URL}, включите отладку (Allow) и повторите."
         )
 
     def _close_browser(self) -> None:
         self._monitor_page = None
         self._lot_page = None
         self._bidcars_page = None
+        self._copart_us_page = None
+        self._iaai_page = None
         self._maps_page = None
         self._context = None
         self._browser = None

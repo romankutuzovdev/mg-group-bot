@@ -8,6 +8,8 @@ type AuthContextValue = {
   loading: boolean;
   configured: boolean;
   botUsername: string | null;
+  telegramPollOk: boolean | null;
+  telegramPollError: string | null;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
   setUser: (user: AuthUser | null) => void;
@@ -20,12 +22,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [configured, setConfigured] = useState(false);
   const [botUsername, setBotUsername] = useState<string | null>(null);
+  const [telegramPollOk, setTelegramPollOk] = useState<boolean | null>(null);
+  const [telegramPollError, setTelegramPollError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const data = await api.authConfig();
     setConfigured(data.configured);
     setBotUsername(data.bot_username);
     setUser(data.user);
+    setTelegramPollOk(data.telegram_poll_ok ?? null);
+    setTelegramPollError(data.telegram_poll_error ?? null);
     setLoading(false);
   }, []);
 
@@ -48,7 +54,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, configured, botUsername, refresh, logout, setUser }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        configured,
+        botUsername,
+        telegramPollOk,
+        telegramPollError,
+        refresh,
+        logout,
+        setUser,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

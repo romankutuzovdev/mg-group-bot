@@ -149,13 +149,12 @@ def format_lot(lot: dict) -> str:
         dtype = _DISMANTLE_LABEL.get(str(quote.get("dismantle_type") or ""), str(quote.get("dismantle_type") or ""))
         lines.append("<b>Расчёт</b>")
         lines.append(f"Ставка: {_gbp(copart.get('bid', lot.get('bid')))}")
-        lines.append(f"Buyer fee: {_gbp(copart.get('buyer_a'))}")
-        lines.append(f"Live bid: {_gbp(copart.get('live_bid'))}")
-        lines.append(f"Lot retrieval: {_gbp(copart.get('retrieval'))}")
-        lines.append(f"VAT на комиссии: {_gbp(copart.get('vat_fees'))}")
-        if copart.get("vat_on_sale") and copart.get("vat_sale"):
-            vat_note = " (Cat B)" if quote.get("category_b") else ""
-            lines.append(f"VAT на ставку{vat_note}: {_gbp(copart.get('vat_sale'))}")
+        try:
+            auction_fee = float(copart.get("copart_total") or 0) - float(copart.get("bid") or 0)
+        except (TypeError, ValueError):
+            auction_fee = None
+        if auction_fee is not None:
+            lines.append(f"Аукционный сбор: {_gbp(auction_fee)}")
         lines.append(f"Copart Total: <b>{_gbp(copart.get('copart_total'))}</b>")
         lines.append(f"Доставка: {_gbp(delivery.get('amount'))} ({_esc(note)})")
         lines.append(f"Комиссия за перевод 3%: {_gbp(quote.get('transfer_fee'))}")

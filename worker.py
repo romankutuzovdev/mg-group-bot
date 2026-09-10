@@ -71,8 +71,23 @@ def fetch_search_lots(row: dict, settings) -> list[dict]:
     return found
 
 
-def run_cycle(settings, store: LotStore, *, notify=None, platform: str | None = None) -> dict:
-    platforms = [platform] if platform in {"copart", "bidcars"} else ["copart", "bidcars"]
+def run_cycle(settings, store: LotStore, *, notify=None, platform: str | None = None, kind: str | None = None) -> dict:
+    want_kind = (kind or "").strip().lower()
+    if want_kind not in {"client", "restoration"}:
+        want_kind = ""
+    if platform in {"copart", "bidcars"}:
+        platforms = [platform]
+        kinds = [want_kind or "client"]
+    elif want_kind == "restoration":
+        platforms = ["copart", "bidcars"]
+        kinds = ["restoration"]
+    elif want_kind == "client":
+        platforms = ["copart", "bidcars"]
+        kinds = ["client"]
+    else:
+        # Полный цикл воркера: клиентские поиски + восстановление
+        platforms = ["copart", "bidcars"]
+        kinds = ["client", "restoration"]
     first = store.is_first_run()
     total_in_search = 0
     total_new = 0
@@ -82,80 +97,83 @@ def run_cycle(settings, store: LotStore, *, notify=None, platform: str | None = 
     succeeded = 0
     blocked: CopartBlockedError | None = None
     lots_by_id: dict[str, dict] = {}
-    scanned_platforms: list[str] = []
+    scanned: list[tuple[str, str]] = []
 
     for plat in platforms:
-        groups = store.searches_by_manager(platform=plat)
-        if not groups:
-            continue
-        seen_ids: list[str] = []
-        scraped_keys: set[str] = set()
-        plat_ok = 0
-        for owner_label, searches in groups:
-            log.info(
-                "Менеджер «%s»: %s поиск(ов) %s по очереди",
-                owner_label,
-                len(searches),
-                "Bid.cars" if plat == "bidcars" else "Copart",
-            )
-            for row in searches:
-                search = Search(name=row["name"], url=row["url"])
-                seed_this = first or not row.get("seeded_at")
-                try:
-                    found = fetch_search_lots(row, settings)
-                except CopartBlockedError as exc:
-                    blocked = exc
-                    log.warning(
-                        "Поиск «%s» пропущен: %s временно недоступен",
-                        search.name,
-                        "Bid.cars" if plat == "bidcars" else "Copart",
-                    )
-                    continue
-                except Exception as exc:
-                    log.warning("Поиск «%s» пропущен: %s", search.name, exc)
-                    continue
-                if plat != "bidcars":
-                    found = [lot for lot in found if lot_allowed(lot, settings)]
-                new_here = 0
-                relist_here = 0
-                for lot in found:
-                    CopartScraper._merge(lots_by_id, [lot])
-                    seen_ids.append(lot["lot_id"])
-                    if seed_this:
-                        continue
-                    event = classify(lot, store)
-                    if event == "new":
-                        new_here += 1
-                    elif event == "relist":
-                        relist_here += 1
-                    if event and notify and settings.telegram_token and lot["lot_id"] not in notified_ids:
-                        try:
-                            notify(settings.telegram_token, settings.telegram_chat_id, lot)
-                            notified += 1
-                            notified_ids.add(lot["lot_id"])
-                            log.info("%s: %s %s", event, lot["lot_id"], lot.get("title"))
-                        except Exception:
-                            log.exception("Telegram: не отправил лот %s", lot["lot_id"])
-                        time.sleep(0.4)
-                store.set_search_scan_stats(row["id"], in_search=len(found), new_count=new_here)
-                store.apply_scan(found, mark_missing=False, seed=seed_this)
-                if not row.get("seeded_at"):
-                    store.mark_search_seeded(row["id"])
-                scraped_keys |= store._search_keys(row)
-                total_in_search += len(found)
-                total_new += new_here
-                total_relist += relist_here
-                succeeded += 1
-                plat_ok += 1
+        for search_kind in kinds:
+            groups = store.searches_by_manager(platform=plat, kind=search_kind)
+            if not groups:
+                continue
+            seen_ids: list[str] = []
+            scraped_keys: set[str] = set()
+            plat_ok = 0
+            kind_label = "восстановление" if search_kind == "restoration" else "клиент"
+            for owner_label, searches in groups:
                 log.info(
-                    "«%s»: %s авто в поиске, новых %s",
-                    search.name,
-                    len(found),
-                    new_here,
+                    "Менеджер «%s»: %s поиск(ов) %s (%s) по очереди",
+                    owner_label,
+                    len(searches),
+                    "Bid.cars" if plat == "bidcars" else "Copart",
+                    kind_label,
                 )
-        if plat_ok:
-            store.mark_missing_for_keys(seen_ids, scraped_keys, source=plat)
-            scanned_platforms.append(plat)
+                for row in searches:
+                    search = Search(name=row["name"], url=row["url"])
+                    seed_this = first or not row.get("seeded_at")
+                    try:
+                        found = fetch_search_lots(row, settings)
+                    except CopartBlockedError as exc:
+                        blocked = exc
+                        log.warning(
+                            "Поиск «%s» пропущен: %s временно недоступен",
+                            search.name,
+                            "Bid.cars" if plat == "bidcars" else "Copart",
+                        )
+                        continue
+                    except Exception as exc:
+                        log.warning("Поиск «%s» пропущен: %s", search.name, exc)
+                        continue
+                    if plat != "bidcars":
+                        found = [lot for lot in found if lot_allowed(lot, settings)]
+                    new_here = 0
+                    relist_here = 0
+                    for lot in found:
+                        CopartScraper._merge(lots_by_id, [lot])
+                        seen_ids.append(lot["lot_id"])
+                        if seed_this:
+                            continue
+                        event = classify(lot, store)
+                        if event == "new":
+                            new_here += 1
+                        elif event == "relist":
+                            relist_here += 1
+                        if event and notify and settings.telegram_token and lot["lot_id"] not in notified_ids:
+                            try:
+                                notify(settings.telegram_token, settings.telegram_chat_id, lot)
+                                notified += 1
+                                notified_ids.add(lot["lot_id"])
+                                log.info("%s: %s %s", event, lot["lot_id"], lot.get("title"))
+                            except Exception:
+                                log.exception("Telegram: не отправил лот %s", lot["lot_id"])
+                            time.sleep(0.4)
+                    store.set_search_scan_stats(row["id"], in_search=len(found), new_count=new_here)
+                    store.apply_scan(found, mark_missing=False, seed=seed_this)
+                    if not row.get("seeded_at"):
+                        store.mark_search_seeded(row["id"])
+                    scraped_keys |= store._search_keys(row)
+                    total_in_search += len(found)
+                    total_new += new_here
+                    total_relist += relist_here
+                    succeeded += 1
+                    plat_ok += 1
+                    log.info(
+                        "«%s»: %s авто в поиске, новых %s",
+                        search.name,
+                        len(found),
+                        new_here,
+                    )
+            if plat_ok:
+                store.mark_missing_for_keys(seen_ids, scraped_keys, source=plat)
+                scanned.append((plat, search_kind))
 
     if succeeded == 0:
         if blocked:
@@ -165,8 +183,8 @@ def run_cycle(settings, store: LotStore, *, notify=None, platform: str | None = 
 
     if first:
         store.mark_seeded()
-        for plat in scanned_platforms:
-            store.mark_all_searches_seeded(platform=plat)
+        for plat, search_kind in scanned:
+            store.mark_all_searches_seeded(platform=plat, kind=search_kind)
         log.info(
             "Первый запуск: сохранил %s лотов в CRM (без пометки «новое»)",
             len(lots_by_id),
@@ -232,10 +250,12 @@ def seed_search_safe(settings, store: LotStore, search_id: int) -> dict:
         raise
 
 
-def run_cycle_safe(settings, store: LotStore, *, notify=None, platform: str | None = None) -> dict:
+def run_cycle_safe(
+    settings, store: LotStore, *, notify=None, platform: str | None = None, kind: str | None = None
+) -> dict:
     run_id = store.start_sync()
     try:
-        result = run_cycle(settings, store, notify=notify, platform=platform)
+        result = run_cycle(settings, store, notify=notify, platform=platform, kind=kind)
         store.finish_sync(
             run_id,
             lots_found=result.get("found", 0),

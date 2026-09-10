@@ -134,12 +134,15 @@ function detectSource(value: string): "copart" | "iaai" {
 
 
 function historyThumb(item: CalcHistoryItem): string | null {
-  if (!item.image) return null;
-  if (item.image.startsWith("/api/media/")) return item.image;
-  if (isCopartPhotoUrl(item.image)) return copartDisplayUrl(item.image);
-  const low = item.image.toLowerCase();
+  const image = item.image;
+  if (!image) return null;
+  if (image.startsWith("/api/media/")) return image;
+  if (isCopartPhotoUrl(image)) return copartDisplayUrl(image);
+  // isCopartPhotoUrl is typed as `url is string`, so after false branch TS thinks never — keep as string
+  const src: string = image;
+  const low = src.toLowerCase();
   if (/\/content\/|clo-platinum|logo|icon|flag|favicon/.test(low)) return null;
-  if (item.image.startsWith("https://")) return item.image;
+  if (src.startsWith("https://")) return src;
   return null;
 }
 
@@ -571,7 +574,7 @@ export default function Calculator() {
                 {lot.cached ? <div className="hint">Не удалось открыть Copart — взял данные из CRM.</div> : null}
                 <h3>{lot.title || `Lot ${lot.lot_id}`}</h3>
                 <p className="hint">
-                  Текущая ставка Copart: {money(lot.bid)} ·{" "}
+                  Текущая ставка Copart: {money(lot.bid)} · аукционные сборы Fee A (12+ авто/год) ·{" "}
                   <a href={lot.url} target="_blank" rel="noreferrer">открыть лот</a>
                 </p>
                 <div className="facts">

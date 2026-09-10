@@ -25,9 +25,18 @@ function ago(value: string | null | undefined) {
   return when(value);
 }
 
-export default function Lots({ platform = "copart" }: { platform?: "copart" | "bidcars" }) {
-  const isBidcars = platform === "bidcars";
-  const siteName = isBidcars ? "Bid.cars" : "Copart";
+export default function Lots({
+  platform = "copart",
+  kind = "client",
+}: {
+  platform?: "copart" | "bidcars";
+  kind?: "client" | "restoration";
+}) {
+  const isRestoration = kind === "restoration";
+  const isBidcars = !isRestoration && platform === "bidcars";
+  const siteName = isRestoration ? "Copart / Bid.cars" : isBidcars ? "Bid.cars" : "Copart";
+  const lotIsUsd = (lot: Lot | null | undefined) =>
+    Boolean(lot?.source === "bidcars" || (!lot?.source && isBidcars));
   const { fxRate } = useFxRate();
   const [state, setState] = useState<AppState | null>(null);
   const [lots, setLots] = useState<Lot[]>([]);
@@ -40,15 +49,21 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
   const [error, setError] = useState("");
 
   const loadState = async () => {
-    setState(await api.state(platform));
+    setState(await api.state(isRestoration ? undefined : platform, kind));
   };
 
   const loadLots = async () => {
+    const base = {
+      stock,
+      q: query,
+      kind,
+      ...(isRestoration ? {} : { source: platform as "copart" | "bidcars" }),
+    };
     if (listMode === "hidden") {
-      setLots(await api.lots({ stock, q: query, status: "skip", source: platform }));
+      setLots(await api.lots({ ...base, status: "skip" }));
       return;
     }
-    setLots(await api.lots({ stock, q: query, feed: true, source: platform }));
+    setLots(await api.lots({ ...base, feed: true }));
   };
 
   const refresh = async () => {
@@ -65,7 +80,7 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
     void refresh();
     const timer = setInterval(() => void refresh(), 20000);
     return () => clearInterval(timer);
-  }, [listMode, stock, query, fxRate, platform]);
+  }, [listMode, stock, query, fxRate, platform, kind]);
 
   useEffect(() => {
     if (!selected) return;
@@ -88,7 +103,13 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
     const data = new FormData(form);
     const url = String(data.get("url") || "").trim();
     if (!url) {
-      setError(isBidcars ? "Вставьте URL поиска с Bid.cars" : "Вставьте URL поиска с Copart");
+      setError(
+        isRestoration
+          ? "Вставьте URL поиска Copart или Bid.cars"
+          : isBidcars
+            ? "Вставьте URL поиска с Bid.cars"
+            : "Вставьте URL поиска с Copart",
+      );
       return;
     }
     setAddingSearch(true);
@@ -100,7 +121,7 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
         comment: String(data.get("comment") || ""),
         client_telegram: String(data.get("telegram") || ""),
         client_phone: String(data.get("phone") || ""),
-        platform,
+        ...(isRestoration ? { kind: "restoration" as const } : { platform, kind: "client" as const }),
       });
       form.reset();
       await refresh();
@@ -108,7 +129,7 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
         setError("");
         for (let i = 0; i < 60; i += 1) {
           await new Promise((resolve) => setTimeout(resolve, 3000));
-          const next = await api.state();
+          const next = await api.state(isRestoration ? undefined : platform, kind);
           setState(next);
           await loadLots();
           if (!next.sync.running) break;
@@ -125,7 +146,7 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
   const onSync = async () => {
     setSyncing(true);
     try {
-      await api.sync(platform);
+      await api.sync(isRestoration ? undefined : platform, kind);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка синхронизации");
@@ -143,7 +164,9 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
     <div className="app">
       <aside className="sidebar">
         <div className="hint">
-          Python каждые {state?.interval_minutes ?? 10} минут проверяет ваши поиски {siteName}.
+          {isRestoration
+            ? `Бот каждые ${state?.interval_minutes ?? 10} минут проверяет поиски авто под восстановление (Copart и Bid.cars).`
+            : `Python каждые ${state?.interval_minutes ?? 10} минут проверяет ваши поиски ${siteName}.`}
           {state?.telegram
             ? ` Новые авто — в Telegram (${state.notify_count ?? 0} чел.).`
             : " Telegram не задан — уведомлений не будет."}
@@ -154,7 +177,7 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
         </div>
         <div className="hint">
           {state?.sync.running || syncing
-            ? `Идёт проверка ${siteName}…`
+            ? `Идёт проверка ${isRestoration ? "восстановления" : siteName}…`
             : `Последняя проверка: ${ago(state?.sync.last?.finished_at || state?.sync.last?.started_at)}`}
         </div>
         {error ? <div className="error">{error}</div> : null}
@@ -166,6 +189,9 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
           {state?.searches.map((item) => (
             <div className="search-card" key={item.id}>
               <strong>{item.name}</strong>
+              {isRestoration && item.platform ? (
+                <div className="hint">{item.platform === "bidcars" ? "Bid.cars" : "Copart"}</div>
+              ) : null}
               {item.params && item.params.length > 0 ? (
                 <div className="chips">
                   {item.params.map((param) => (
@@ -213,12 +239,14 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
         </div>
         <form className="form" onSubmit={(event) => void onAddSearch(event)}>
           <input className="field" name="name" placeholder="Название (необязательно)" />
-          <textarea className="field" name="url" rows={3} placeholder={isBidcars ? "URL поиска с Bid.cars — фильтры подтянутся сами" : "URL поиска с Copart — фильтры подтянутся сами"} required />
-          <input className="field" name="telegram" placeholder="Telegram клиента: @username или ID" />
-          <input className="field" name="phone" placeholder="Телефон клиента" />
-          <textarea className="field" name="comment" rows={2} placeholder="Комментарий: для кого ищем, цвет, бюджет…" />
+          <textarea className="field" name="url" rows={3} placeholder={isRestoration ? "URL поиска Copart или Bid.cars — фильтры подтянутся сами" : isBidcars ? "URL поиска с Bid.cars — фильтры подтянутся сами" : "URL поиска с Copart — фильтры подтянутся сами"} required />
+          <input className="field" name="telegram" placeholder={isRestoration ? "Telegram: @username или ID (необязательно)" : "Telegram клиента: @username или ID"} />
+          <input className="field" name="phone" placeholder={isRestoration ? "Телефон (необязательно)" : "Телефон клиента"} />
+          <textarea className="field" name="comment" rows={2} placeholder={isRestoration ? "Комментарий: тип повреждения, бюджет, регион…" : "Комментарий: для кого ищем, цвет, бюджет…"} />
           <div className="hint">
-            Когда авто появится в поиске, уведомление придёт в Telegram только вам. Клиенту бот ничего не пишет — его Telegram и телефон только для заметки.
+            {isRestoration
+              ? "Поиски здесь отделены от клиентских Copart/Bid.cars. Когда появится новое авто — уведомление в Telegram, если бот включён."
+              : "Когда авто появится в поиске, уведомление придёт в Telegram только вам. Клиенту бот ничего не пишет — его Telegram и телефон только для заметки."}
           </div>
           <button className="btn" type="submit" disabled={addingSearch}>
             {addingSearch ? "Добавляю…" : "Добавить поиск"}
@@ -229,9 +257,13 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
       <main className="main">
         <div className="top">
           <div>
-            <div className="brand" style={{ fontSize: 26 }}>Новые находки</div>
+            <div className="brand" style={{ fontSize: 26 }}>
+              {isRestoration ? "Авто под восстановление" : "Новые находки"}
+            </div>
             <div className="hint">
-              Только лоты, которых не было на первом прогоне. База мониторинга скрыта.
+              {isRestoration
+                ? "Отдельная лента для бота восстановления. Новые лоты — только после первичной загрузки поиска."
+                : "Только лоты, которых не было на первом прогоне. База мониторинга скрыта."}
             </div>
           </div>
           <div className="top-right">
@@ -241,7 +273,7 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
               <option value="hidden">Скрытые</option>
             </select>
             <select className="select" value={stock} onChange={(e) => setStock(e.target.value as StockFilter)}>
-              <option value="in">Сейчас на {siteName}</option>
+              <option value="in">Сейчас в поиске</option>
               <option value="out">Уже нет в поиске</option>
               <option value="all">Все</option>
             </select>
@@ -296,9 +328,9 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
                 <div className="lot-card-prices">
                   <span className="lot-price-item">
                     <span className="lot-price-kind">Ставка</span>
-                    <b>{isBidcars ? usd(lot.bid) : money(lot.bid)}</b>
+                    <b>{lotIsUsd(lot) ? usd(lot.bid) : money(lot.bid)}</b>
                   </span>
-                  {isBidcars ? (
+                  {lotIsUsd(lot) ? (
                     <>
                       <span className="lot-price-item">
                         <span className="lot-price-kind">Пробег</span>
@@ -400,13 +432,13 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
             </div>
           ) : null}
           <p>
-            Ставка {isBidcars ? usd(selectedLot.bid) : money(selectedLot.bid)}<br />
+            Ставка {lotIsUsd(selectedLot) ? usd(selectedLot.bid) : money(selectedLot.bid)}<br />
             Аукцион {selectedLot.sale_date || "—"}<br />
             Пробег {selectedLot.odometer ?? "—"}<br />
             Проверено {ago(selectedLot.last_seen)} · {when(selectedLot.last_seen)}<br />
             {selectedLot.in_stock ? "Сейчас есть в поиске" : "Больше нет в результатах"}
           </p>
-          {isBidcars ? (
+          {lotIsUsd(selectedLot) ? (
             <p className="hint">
               {selectedLot.bid == null
                 ? "Нет ставки — появится, когда Bid.cars отдаст current bid."
@@ -417,7 +449,11 @@ export default function Lots({ platform = "copart" }: { platform?: "copart" | "b
           ) : (
             <p className="hint">Нет ставки — расчёт появится, когда Copart отдаст current bid.</p>
           )}
-          <p><a href={selectedLot.url} target="_blank" rel="noreferrer">Открыть на {siteName}</a></p>
+          <p>
+            <a href={selectedLot.url} target="_blank" rel="noreferrer">
+              Открыть на {selectedLot.source === "bidcars" ? "Bid.cars" : selectedLot.source === "copart" ? "Copart" : siteName}
+            </a>
+          </p>
           <label className="hint">Статус</label>
           <select
             className="select"

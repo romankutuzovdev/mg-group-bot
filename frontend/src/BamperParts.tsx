@@ -241,39 +241,6 @@ function formatProposalTelegram(job: BamperJob, info: VehicleInfo, html: boolean
   return packTelegram(blocks);
 }
 
-function formatProposalText(job: BamperJob, info: VehicleInfo): string {
-  const car = carTitle(info, job);
-  const date = new Date().toLocaleDateString("ru-RU");
-  const parts = proposalParts(job);
-  const totals = proposalTotals(parts);
-  const lines = [
-    "MG Group",
-    "Коммерческое предложение",
-    date,
-    "",
-    `Авто: ${car}`,
-  ];
-  if (info.vin) lines.push(`VIN: ${info.vin}`);
-  if (info.lotId) lines.push(`Лот: ${info.lotId}`);
-  if (info.url) lines.push(info.url);
-  lines.push("");
-  lines.push(`Оценка авто (основные запчасти, сумма средних цен Bamper.by): ${byn(totals.sumAvg || null)}`);
-  lines.push(`Основных позиций: ${parts.length}`);
-  if (totals.withOffers) lines.push(`С объявлениями: ${totals.withOffers}`);
-  lines.push("");
-  lines.push("Запчасти:");
-  parts.forEach((p, idx) => {
-    const price = p.avg_byn != null ? byn(p.avg_byn) : "по запросу";
-    const ads = p.count == null ? "" : `, объявлений: ${p.count}`;
-    lines.push(`${idx + 1}. ${p.name} — ${price}${ads}`);
-    lines.push(p.url);
-  });
-  lines.push("");
-  lines.push("Цены — средние по объявлениям bamper.by на дату предложения.");
-  lines.push("Не являются публичной офертой.");
-  return lines.join("\n");
-}
-
 function formatProposalHtml(job: BamperJob, info: VehicleInfo): string {
   const car = carTitle(info, job);
   const date = new Date().toLocaleDateString("ru-RU");

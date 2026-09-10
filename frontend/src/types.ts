@@ -11,18 +11,39 @@ export interface UsaDelivery {
   miles_to_new_jersey?: number | null;
   miles_to_houston?: number | null;
   distance_source?: string | null;
-  rate_usd_per_mile?: number;
+  rate_usd_per_mile?: number | null;
   destination_port: string;
   destination_label: string;
   inland_usd: number;
   ocean_usd: number;
+  ocean_destination?: string | null;
+  vehicle_size?: string | null;
+  vehicle_size_label?: string | null;
+  matched_yard?: string | null;
+  matched_auction?: string | null;
+  tariff_source?: string | null;
+  price_sheet?: UsaPriceSheet | null;
   bidcars_fee_usd: number;
   shipping_total_usd: number;
   america_subtotal_usd: number;
 }
 
+export interface UsaPriceSheet {
+  yard?: string | null;
+  auction?: string | null;
+  us_port?: string | null;
+  us_port_label?: string | null;
+  ocean_destination?: string | null;
+  selected_size?: string | null;
+  size_labels?: Record<string, string>;
+  inland_by_size?: Record<string, number | null>;
+  ocean_by_size?: Record<string, number | null>;
+  selected_inland_usd?: number | null;
+  selected_ocean_usd?: number | null;
+}
+
 export interface IaaiFees {
-  auction: "iaai";
+  auction: "iaai" | "bidcars" | string;
   market: string;
   currency: string;
   volume: string;
@@ -40,10 +61,15 @@ export interface IaaiFees {
   fixed_fees: number;
   fees_net: number;
   iaai_total: number;
+  auction_fees_usd?: number | null;
+  fees_source?: "bidcars" | "iaai" | string | null;
 }
 
 export interface IaaiQuote {
   auction: "iaai";
+  purpose?: "iaai" | "restoration" | string;
+  vehicle_size?: string | null;
+  vehicle_size_label?: string | null;
   iaai: IaaiFees;
   delivery_usa?: UsaDelivery | null;
   subtotal_usa?: number;
@@ -55,12 +81,27 @@ export interface IaaiQuote {
   dismantle_type: string;
   dismantle_mode?: string;
   dismantle_kg?: number | null;
+  dismantle_label?: string;
   vehicle_type: string;
+  title_document?: string | null;
+  title_doc_usd?: number | null;
+  title_fee_info?: {
+    document_raw?: string;
+    matched_rule?: string | null;
+    matched_id?: string | null;
+    cost_usd?: number | null;
+    free?: boolean;
+    unmatched?: boolean;
+  } | null;
+  is_sublot?: boolean | null;
+  sublot_location?: string | null;
+  sublot_usd?: number | null;
   grand_usd?: number | null;
 }
 
 export interface BidcarsLot {
-  source: "bidcars";
+  source: "bidcars" | "copart_us" | "iaai" | string;
+  auction_platform?: "copart" | "iaai" | string;
   lot_id: string;
   title: string;
   year: number | null;
@@ -72,6 +113,7 @@ export interface BidcarsLot {
   ship_from: string | null;
   seller?: string | null;
   documents?: string | null;
+  title_code?: string | null;
   sale_date?: string | null;
   odometer?: number | null;
   primary_damage?: string | null;
@@ -90,11 +132,15 @@ export interface BidcarsLot {
   inland_miles?: number | null;
   us_port?: string | null;
   us_port_label?: string | null;
+  is_sublot?: boolean | null;
+  sublot_location?: string | null;
   miles_to_new_jersey?: number | null;
   miles_to_houston?: number | null;
   distance_source?: string | null;
   inland_route?: Record<string, unknown> | null;
   bidcars_fee_usd?: number | null;
+  auction_url?: string | null;
+  auction_fees_usd?: number | null;
   ocean_usd_by_port?: Record<string, number>;
   dismantle_type?: string;
   quote?: IaaiQuote | null;
@@ -106,15 +152,20 @@ export interface LotQuote {
     bid: number;
     buyer_a: number;
     buyer_b: number;
+    buyer_fee?: number;
+    buyer_fee_tier?: "A" | "B" | string;
+    buyer_fee_label?: string;
     saving: number;
     live_bid: number;
     retrieval: number;
     fees_net: number;
+    auction_fees?: number;
     vat_fees: number;
     vat_sale: number;
     vat_on_sale: boolean;
     vat_sum: number;
     copart_total: number;
+    fees_source?: string;
   };
   delivery: {
     region_key: string;
@@ -250,6 +301,7 @@ export interface SearchItem {
   last_new?: number | null;
   last_checked_at?: string | null;
   platform?: "copart" | "bidcars" | string;
+  kind?: "client" | "restoration" | string;
 }
 
 export interface AppState {
@@ -274,12 +326,16 @@ export interface AppState {
   };
   searches: SearchItem[];
   platform?: "copart" | "bidcars" | string;
+  kind?: "client" | "restoration" | string;
   interval_minutes: number;
   telegram: boolean;
   notify_count?: number;
   me?: AuthUser | null;
   fx_rate: number | null;
   fx_source?: string | null;
+  eur_byn?: number | null;
+  usd_byn?: number | null;
+  byn_rates_source?: string | null;
 }
 
 export interface AuthUser {
@@ -298,6 +354,8 @@ export interface AuthConfig {
   configured: boolean;
   bot_username: string | null;
   user: AuthUser | null;
+  telegram_poll_ok?: boolean | null;
+  telegram_poll_error?: string | null;
 }
 
 export interface LoginStart {

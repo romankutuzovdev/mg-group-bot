@@ -22,6 +22,9 @@ export default function Layout() {
           <NavLink to="/bidcars" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
             Bid.cars
           </NavLink>
+          <NavLink to="/restoration" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
+            Авто под восстановление
+          </NavLink>
           <NavLink to="/calc" className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}>
             Калькулятор
           </NavLink>

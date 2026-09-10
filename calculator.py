@@ -6,6 +6,9 @@ from typing import Any
 VAT_RATE = 0.2
 TRANSFER_FEE_RATE = 0.03
 LOT_RETRIEVAL_FEE = 50.0
+# Fee A — high volume: 12+ авто за текущий или прошлый календарный год (официально Copart UK).
+# Fee B — low volume: меньше 12 авто.
+DEFAULT_BUYER_FEE_TIER = "A"
 DISMANTLE_WEIGHT_BASE = 800.0
 DISMANTLE_WEIGHT_PER_KG = 1.6
 DISMANTLE_FROM_TYPE = {
@@ -172,12 +175,14 @@ def get_delivery(
 
 
 def get_buyer_fee(price: float, tier: str = "A") -> float:
+    """Buyer fee Copart UK. tier=A → 12+ авто/год, tier=B → меньше 12."""
+    band = "B" if str(tier or "A").strip().upper() == "B" else "A"
     if price >= 10000:
-        return round2(price * (0.065 if tier == "B" else 0.055))
+        return round2(price * (0.065 if band == "B" else 0.055))
     for max_price, fee_a, fee_b in BUYER_FEE_BANDS:
         if price <= max_price:
-            return float(fee_b if tier == "B" else fee_a)
-    return float(BUYER_FEE_BANDS[-1][2 if tier == "B" else 1])
+            return float(fee_b if band == "B" else fee_a)
+    return float(BUYER_FEE_BANDS[-1][2 if band == "B" else 1])
 
 
 def get_live_bid_fee(price: float) -> float:
@@ -187,29 +192,42 @@ def get_live_bid_fee(price: float) -> float:
     return 109.0
 
 
-def estimate_copart_wholesale(bid: float, vat_on_sale: bool) -> dict:
+def estimate_copart_wholesale(bid: float, vat_on_sale: bool, *, buyer_tier: str = DEFAULT_BUYER_FEE_TIER) -> dict:
+    """Аукционные сборы Copart.co.uk. По умолчанию Fee A (покупатель 12+ авто/год)."""
     sale = round2(bid)
+    tier = "B" if str(buyer_tier or DEFAULT_BUYER_FEE_TIER).strip().upper() == "B" else "A"
     buyer_a = get_buyer_fee(sale, "A")
     buyer_b = get_buyer_fee(sale, "B")
+    buyer = buyer_a if tier == "A" else buyer_b
     live_bid = get_live_bid_fee(sale)
     retrieval = LOT_RETRIEVAL_FEE
-    fees_net = round2(buyer_a + live_bid + retrieval)
+    fees_net = round2(buyer + live_bid + retrieval)
     vat_fees = round2(fees_net * VAT_RATE)
     vat_sale = round2(sale * VAT_RATE) if vat_on_sale else 0.0
+    auction_fees = round2(fees_net + vat_fees)  # сборы без VAT на ставку
     copart_total = round2(sale + fees_net + vat_fees + vat_sale)
     return {
         "bid": sale,
+        "buyer_fee_tier": tier,
+        "buyer_fee_label": (
+            "Fee A · 12+ авто/год"
+            if tier == "A"
+            else "Fee B · меньше 12 авто/год"
+        ),
         "buyer_a": buyer_a,
         "buyer_b": buyer_b,
-        "saving": round2(buyer_b - buyer_a),
+        "buyer_fee": buyer,
+        "saving": round2(buyer_b - buyer_a) if tier == "A" else 0.0,
         "live_bid": live_bid,
         "retrieval": retrieval,
         "fees_net": fees_net,
+        "auction_fees": auction_fees,
         "vat_fees": vat_fees,
         "vat_sale": vat_sale,
         "vat_on_sale": bool(vat_on_sale),
         "vat_sum": round2(vat_fees + vat_sale),
         "copart_total": copart_total,
+        "fees_source": "copart_uk",
     }
 
 
@@ -318,19 +336,17 @@ def format_quote_text(lot: dict, quote: dict) -> str:
         [
             "",
             f"Ставка: £{copart['bid']:,.2f}",
-            f"Buyer fee (опт): £{copart['buyer_a']:,.2f}",
+            f"Buyer fee ({copart.get('buyer_fee_label') or 'Fee A · 12+ авто/год'}): £{float(copart.get('buyer_fee') or copart['buyer_a']):,.2f}",
             f"Live bid fee: £{copart['live_bid']:,.2f}",
             f"Lot retrieval: £{copart['retrieval']:,.2f}",
             f"VAT 20% на комиссии: £{copart['vat_fees']:,.2f}",
         ]
     )
-    if copart.get("vat_on_sale") and copart.get("vat_sale"):
-        lines.append(
-            f"VAT 20% на ставку{' (Cat B)' if quote.get('category_b') else ''}: £{copart['vat_sale']:,.2f}"
-        )
+    if copart.get("vat_sale"):
+        lines.append(f"VAT 20% на ставку: £{copart['vat_sale']:,.2f}")
     lines.extend(
         [
-            f"VAT итого: £{copart['vat_sum']:,.2f}",
+            f"Аукционный сбор: £{float(copart.get('auction_fees') or round2(float(copart['copart_total']) - float(copart['bid']) - float(copart.get('vat_sale') or 0))):,.2f}",
             "────────────────────",
             f"Copart Total: £{copart['copart_total']:,.2f}",
             f"Доставка: £{delivery['amount']:,.2f} ({note})",

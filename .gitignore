@@ -1,0 +1,10 @@
+# Runtime data and browser profiles
+/data/
+
+# Cache files
+__pycache__/
+*.py[cod]
+.cache/
+cache/
+Cache/
+

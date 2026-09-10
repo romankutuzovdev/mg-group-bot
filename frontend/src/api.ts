@@ -105,14 +105,22 @@ export const api = {
   users: () => request<AuthUser[]>("/api/users"),
   patchUser: (id: number, body: { notify?: boolean; enabled?: boolean; role?: string }) =>
     request<AuthUser>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
-  state: (platform?: "copart" | "bidcars") => {
-    const query = platform ? `?platform=${platform}` : "";
-    return request<AppState>(`/api/state${query}`);
+  state: (platform?: "copart" | "bidcars", kind?: "client" | "restoration") => {
+    const query = new URLSearchParams();
+    if (kind === "restoration") query.set("kind", "restoration");
+    else if (platform) query.set("platform", platform);
+    const qs = query.toString();
+    return request<AppState>(`/api/state${qs ? `?${qs}` : ""}`);
   },
   setFxRate: (fx_rate: number) =>
     request<{ fx_rate: number; fx_source: string }>("/api/settings/fx-rate", {
       method: "POST",
       body: JSON.stringify({ fx_rate }),
+    }),
+  setBynRates: (body: { eur_byn?: number | null; usd_byn?: number | null; auto?: boolean }) =>
+    request<{ eur_byn: number | null; usd_byn: number | null; source: string }>("/api/settings/byn-rates", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   lots: (params: {
     status?: string;
@@ -121,6 +129,7 @@ export const api = {
     search?: string;
     feed?: boolean;
     source?: "copart" | "bidcars";
+    kind?: "client" | "restoration";
   }) => {
     const query = new URLSearchParams({ stock: params.stock });
     if (params.status) query.set("status", params.status);
@@ -128,6 +137,7 @@ export const api = {
     if (params.search) query.set("search", params.search);
     if (params.feed) query.set("feed", "1");
     if (params.source) query.set("source", params.source);
+    if (params.kind) query.set("kind", params.kind);
     return request<Lot[]>(`/api/lots?${query}`);
   },
   patchLot: (lotId: string, body: { status?: LotStatus; notes?: string }) =>
@@ -139,6 +149,7 @@ export const api = {
     client_telegram?: string;
     client_phone?: string;
     platform?: "copart" | "bidcars";
+    kind?: "client" | "restoration";
   }) => request<SearchItem>("/api/searches", { method: "POST", body: JSON.stringify(body) }),
   patchSearch: (id: number, body: {
     name?: string;
@@ -153,9 +164,12 @@ export const api = {
     }),
   deleteSearch: (id: number) =>
     request<{ ok: boolean }>(`/api/searches/${id}`, { method: "DELETE" }),
-  sync: (platform?: "copart" | "bidcars") => {
-    const query = platform ? `?platform=${platform}` : "";
-    return request<Record<string, unknown>>(`/api/sync${query}`, { method: "POST" });
+  sync: (platform?: "copart" | "bidcars", kind?: "client" | "restoration") => {
+    const query = new URLSearchParams();
+    if (kind === "restoration") query.set("kind", "restoration");
+    else if (platform) query.set("platform", platform);
+    const qs = query.toString();
+    return request<Record<string, unknown>>(`/api/sync${qs ? `?${qs}` : ""}`, { method: "POST" });
   },
   lookupLot: (url: string) =>
     request<LotDetails>("/api/calc/lookup", { method: "POST", body: JSON.stringify({ url }) }),
@@ -207,8 +221,32 @@ export const api = {
     primary_damage?: string | null;
     documents?: string | null;
     images?: string[] | null;
+    purpose?: "iaai" | "restoration" | string | null;
+    vehicle_size?: "regular" | "oversize" | "moto" | string | null;
+    auction_platform?: "iaai" | "copart" | string | null;
+    ocean_destination?: "klaipeda" | "poti" | string | null;
+    title_code?: string | null;
+    is_sublot?: boolean | null;
+    sublot_location?: string | null;
+    auction_fees_usd?: number | null;
   }) =>
     request<{ quote: IaaiQuote; quote_text: string; dismantle_type: string; history_id?: number | null }>("/api/calc/iaai", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  checkSublot: (body: {
+    auction_url?: string | null;
+    auction_platform?: string | null;
+    lot_id?: string | null;
+  }) =>
+    request<{
+      is_sublot: boolean;
+      sublot_location?: string | null;
+      auction_platform?: string | null;
+      auction_url?: string | null;
+      checked?: boolean;
+      error?: string | null;
+    }>("/api/calc/check-sublot", {
       method: "POST",
       body: JSON.stringify(body),
     }),
@@ -234,6 +272,55 @@ export const api = {
   bamperJob: (id: string) => request<BamperJob>(`/api/bamper/jobs/${id}`),
   bamperCancel: (id: string) =>
     request<BamperJob>(`/api/bamper/jobs/${id}/cancel`, { method: "POST", body: "{}" }),
+  customsBy: (body: {
+    price_usd?: number | null;
+    price_eur?: number | null;
+    engine_cc?: number | null;
+    year?: number | null;
+    age_band?: string | null;
+    engine_type?: string | null;
+    fuel?: string | null;
+    engine?: string | null;
+    title?: string | null;
+    person?: "individual" | "company" | string;
+    benefit_50?: boolean;
+    include_epts?: boolean;
+    eur_byn?: number | null;
+    usd_byn?: number | null;
+    rates_auto?: boolean;
+  }) =>
+    request<{
+      ok: boolean;
+      engine_type: string;
+      is_electric: boolean;
+      person: string;
+      age_band: string;
+      age_band_label: string;
+      year?: number | null;
+      engine_cc?: number | null;
+      customs_value_eur: number;
+      customs_value_usd?: number | null;
+      duty_eur: number;
+      duty_byn: number;
+      duty_note?: string;
+      formula?: string;
+      benefit_50?: boolean;
+      util_fee_byn: number;
+      customs_ops_fee_byn: number;
+      epts_fee_byn: number;
+      total_byn: number;
+      total_eur: number;
+      total_usd?: number | null;
+      rates?: { EUR_BYN?: number; USD_BYN?: number; source?: string };
+      notes?: string[];
+    }>("/api/calc/customs-by", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  titleTariffs: () =>
+    request<{ items: { id?: string | null; name: string; cost_usd: number; cost_raw?: string }[] }>(
+      "/api/calc/title-tariffs"
+    ),
   sendTelegram: (messages: string[]) =>
     request<{ ok: boolean; sent: number }>("/api/telegram/send", {
       method: "POST",

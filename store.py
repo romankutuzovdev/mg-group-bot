@@ -203,12 +203,16 @@ class LotStore:
         self._ensure_column("searches", "last_checked_at", "TEXT")
         self._ensure_column("calc_history", "auction", "TEXT")
         self._ensure_column("searches", "platform", "TEXT")
+        self._ensure_column("searches", "kind", "TEXT")
         self._ensure_column("lots", "source", "TEXT")
         self._conn.execute(
             "UPDATE searches SET platform = 'bidcars' WHERE LOWER(url) LIKE '%bid.cars%' AND (platform IS NULL OR platform = '' OR platform = 'copart')"
         )
         self._conn.execute(
             "UPDATE searches SET platform = 'copart' WHERE platform IS NULL OR platform = ''"
+        )
+        self._conn.execute(
+            "UPDATE searches SET kind = 'client' WHERE kind IS NULL OR kind = ''"
         )
         self._conn.execute(
             "UPDATE lots SET source = 'bidcars' WHERE LOWER(COALESCE(url, '')) LIKE '%bid.cars%' AND (source IS NULL OR source = '' OR source = 'copart')"
@@ -291,12 +295,24 @@ class LotStore:
         LEFT JOIN users u ON u.id = s.owner_user_id
     """
 
-    def list_searches(self, *, with_counts: bool = True, platform: str | None = None) -> list[dict]:
+    def list_searches(
+        self,
+        *,
+        with_counts: bool = True,
+        platform: str | None = None,
+        kind: str | None = None,
+    ) -> list[dict]:
         sql = self._SEARCH_SELECT
         params: list = []
+        clauses: list[str] = []
         if platform:
-            sql += " WHERE COALESCE(s.platform, 'copart') = ?"
+            clauses.append("COALESCE(s.platform, 'copart') = ?")
             params.append(platform)
+        if kind:
+            clauses.append("COALESCE(s.kind, 'client') = ?")
+            params.append(kind)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY s.id"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -324,6 +340,8 @@ class LotStore:
         if platform not in {"copart", "bidcars"}:
             platform = "bidcars" if "bid.cars" in url.lower() else "copart"
         data["platform"] = platform
+        kind = str(data.get("kind") or "").strip().lower()
+        data["kind"] = kind if kind in {"client", "restoration"} else "client"
         parsed = parse_bidcars_search(url) if platform == "bidcars" else parse_copart_search(url)
         data["params"] = parsed["params"]
         data["summary"] = parsed["summary"]
@@ -407,10 +425,12 @@ class LotStore:
                 )
             self._conn.commit()
 
-    def searches_by_manager(self, *, platform: str | None = None) -> list[tuple[str, list[dict]]]:
+    def searches_by_manager(
+        self, *, platform: str | None = None, kind: str | None = None
+    ) -> list[tuple[str, list[dict]]]:
         rows = [
             item
-            for item in self.list_searches(with_counts=False, platform=platform)
+            for item in self.list_searches(with_counts=False, platform=platform, kind=kind)
             if item.get("enabled")
         ]
         groups: dict[object, list[dict]] = {}
@@ -428,12 +448,18 @@ class LotStore:
             result.append((label, items))
         return result
 
-    def enabled_searches(self, *, platform: str | None = None) -> list[Search]:
+    def enabled_searches(self, *, platform: str | None = None, kind: str | None = None) -> list[Search]:
         return [
             Search(name=item["name"], url=item["url"])
-            for item in self.list_searches(with_counts=False, platform=platform)
+            for item in self.list_searches(with_counts=False, platform=platform, kind=kind)
             if item["enabled"]
         ]
+
+    def search_keys(self, *, platform: str | None = None, kind: str | None = None) -> set[str]:
+        keys: set[str] = set()
+        for item in self.list_searches(with_counts=False, platform=platform, kind=kind):
+            keys |= self._search_keys(item)
+        return keys
 
     def import_searches(self, searches: list[Search]) -> None:
         with self._lock:
@@ -458,18 +484,25 @@ class LotStore:
         client_phone: str = "",
         owner_user_id: int | None = None,
         platform: str = "copart",
+        kind: str = "client",
     ) -> dict:
         plat = "bidcars" if str(platform).strip().lower() == "bidcars" else "copart"
+        search_kind = "restoration" if str(kind).strip().lower() == "restoration" else "client"
         parsed = parse_bidcars_search(url) if plat == "bidcars" else parse_copart_search(url)
-        label = name.strip() or parsed["summary"] or ("Поиск Bid.cars" if plat == "bidcars" else "Поиск")
+        if name.strip():
+            label = name.strip()
+        elif search_kind == "restoration":
+            label = parsed["summary"] or ("Восстановление Bid.cars" if plat == "bidcars" else "Восстановление")
+        else:
+            label = parsed["summary"] or ("Поиск Bid.cars" if plat == "bidcars" else "Поиск")
         note = (comment or "").strip()
         telegram = (client_telegram or "").strip()
         phone = (client_phone or "").strip()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO searches(name, url, enabled, created_at, comment, client_telegram, client_phone, owner_user_id, platform)
-                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                INSERT INTO searches(name, url, enabled, created_at, comment, client_telegram, client_phone, owner_user_id, platform, kind)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     name = excluded.name,
                     enabled = 1,
@@ -477,9 +510,10 @@ class LotStore:
                     client_telegram = excluded.client_telegram,
                     client_phone = excluded.client_phone,
                     owner_user_id = COALESCE(searches.owner_user_id, excluded.owner_user_id),
-                    platform = excluded.platform
+                    platform = excluded.platform,
+                    kind = excluded.kind
                 """,
-                (label, url.strip(), _now(), note, telegram, phone, owner_user_id, plat),
+                (label, url.strip(), _now(), note, telegram, phone, owner_user_id, plat, search_kind),
             )
             self._conn.commit()
             row = self._conn.execute(
@@ -598,22 +632,20 @@ class LotStore:
             )
             self._conn.commit()
 
-    def mark_all_searches_seeded(self, platform: str | None = None) -> None:
+    def mark_all_searches_seeded(self, platform: str | None = None, kind: str | None = None) -> None:
         with self._lock:
+            clauses = ["seeded_at IS NULL"]
+            params: list = [_now()]
             if platform:
-                self._conn.execute(
-                    """
-                    UPDATE searches
-                    SET seeded_at = ?
-                    WHERE seeded_at IS NULL AND COALESCE(platform, 'copart') = ?
-                    """,
-                    (_now(), platform),
-                )
-            else:
-                self._conn.execute(
-                    "UPDATE searches SET seeded_at = ? WHERE seeded_at IS NULL",
-                    (_now(),),
-                )
+                clauses.append("COALESCE(platform, 'copart') = ?")
+                params.append(platform)
+            if kind:
+                clauses.append("COALESCE(kind, 'client') = ?")
+                params.append(kind)
+            self._conn.execute(
+                f"UPDATE searches SET seeded_at = ? WHERE {' AND '.join(clauses)}",
+                params,
+            )
             self._conn.commit()
 
     def delete_search(self, search_id: int) -> None:
@@ -675,6 +707,41 @@ class LotStore:
         self.set_meta("fx_rate_updated_at", _now())
         self.set_meta("fx_rate_source", source)
         return float(text)
+
+    def get_byn_rates(self) -> dict:
+        """Курсы EUR/BYN и USD/BYN для растаможки РБ."""
+        def _f(key: str) -> float | None:
+            raw = self.get_meta(key)
+            if not raw:
+                return None
+            try:
+                val = float(raw)
+                return val if val > 0 else None
+            except ValueError:
+                return None
+
+        return {
+            "eur_byn": _f("eur_byn"),
+            "usd_byn": _f("usd_byn"),
+            "source": self.get_meta("byn_rates_source") or "default",
+        }
+
+    def set_byn_rates(
+        self,
+        *,
+        eur_byn: float | None = None,
+        usd_byn: float | None = None,
+        source: str = "manual",
+    ) -> dict:
+        if eur_byn is not None and float(eur_byn) > 0:
+            text = f"{float(eur_byn):.6f}".rstrip("0").rstrip(".")
+            self.set_meta("eur_byn", text)
+        if usd_byn is not None and float(usd_byn) > 0:
+            text = f"{float(usd_byn):.6f}".rstrip("0").rstrip(".")
+            self.set_meta("usd_byn", text)
+        self.set_meta("byn_rates_source", source)
+        self.set_meta("byn_rates_updated_at", _now())
+        return self.get_byn_rates()
 
     def get(self, lot_id: str) -> dict | None:
         with self._lock:
@@ -855,6 +922,7 @@ class LotStore:
         in_stock: bool | None = True,
         feed: bool = False,
         source: str | None = None,
+        kind: str | None = None,
     ) -> list[dict]:
         sql = "SELECT * FROM lots WHERE 1=1"
         params: list = []
@@ -891,7 +959,21 @@ class LotStore:
             rows = self._conn.execute(sql, params).fetchall()
         fx_rate = self.get_fx_rate()
         lots = [self._lot_row(row, fx_rate) for row in rows]
-        return self._attach_search_params(lots)
+        lots = self._attach_search_params(lots)
+        if kind:
+            # Для client фильтруем по платформе source; для restoration — все площадки
+            keys = self.search_keys(
+                platform=source if kind == "client" else None,
+                kind=kind,
+            )
+            if not keys:
+                return []
+            lots = [
+                lot
+                for lot in lots
+                if self._name_set(lot.get("search_names")) & keys
+            ]
+        return lots
 
     def update_lot(self, lot_id: str, *, status: str | None = None, notes: str | None = None) -> dict | None:
         with self._lock:
@@ -906,37 +988,48 @@ class LotStore:
             self._conn.commit()
         return self.get(lot_id)
 
-    def stats(self, *, platform: str | None = None) -> dict:
+    def stats(self, *, platform: str | None = None, kind: str | None = None) -> dict:
+        search_kind = kind or "client"
         searches = [
             item
-            for item in self.list_searches(with_counts=False, platform=platform)
+            for item in self.list_searches(with_counts=False, platform=platform, kind=search_kind)
             if item.get("enabled")
         ]
         in_search = sum(int(item.get("last_in_search") or 0) for item in searches)
         new_from_search = sum(int(item.get("last_new") or 0) for item in searches)
-        source = platform
+        keys = self.search_keys(platform=platform, kind=search_kind)
         with self._lock:
-            def count(where: str = "", params: tuple = ()) -> int:
-                sql = "SELECT COUNT(*) FROM lots " + where
-                return int(self._conn.execute(sql, params).fetchone()[0])
+            rows = self._conn.execute(
+                "SELECT status, in_stock, search_names, source FROM lots"
+            ).fetchall()
 
-            source_sql = ""
-            source_params: tuple = ()
-            if source:
-                source_sql = " AND COALESCE(source, 'copart') = ?"
-                source_params = (source,)
+        watching = bid = gone = all_count = 0
+        for row in rows:
+            if keys and not (self._name_set(row["search_names"]) & keys):
+                continue
+            if platform:
+                row_source = str(row["source"] or "copart").strip().lower() or "copart"
+                if row_source != platform:
+                    continue
+            all_count += 1
+            if not row["in_stock"]:
+                gone += 1
+                continue
+            status = row["status"]
+            if status == "watching":
+                watching += 1
+            elif status == "bid":
+                bid += 1
 
-            return {
-                "in_stock": in_search,
-                "in_search": in_search,
-                "new": new_from_search,
-                "watching": count(
-                    f"WHERE in_stock = 1 AND status = 'watching'{source_sql}", source_params
-                ),
-                "bid": count(f"WHERE in_stock = 1 AND status = 'bid'{source_sql}", source_params),
-                "gone": count(f"WHERE in_stock = 0{source_sql}", source_params),
-                "all": count(f"WHERE 1=1{source_sql}", source_params),
-            }
+        return {
+            "in_stock": in_search,
+            "in_search": in_search,
+            "new": new_from_search,
+            "watching": watching,
+            "bid": bid,
+            "gone": gone,
+            "all": all_count,
+        }
 
     def start_sync(self) -> int:
         with self._lock:

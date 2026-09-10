@@ -71,6 +71,7 @@ class SearchIn(BaseModel):
     client_telegram: str = ""
     client_phone: str = ""
     platform: str | None = None
+    kind: str | None = None
 
 
 class SearchPatch(BaseModel):
@@ -84,7 +85,11 @@ def normalize_search_url(url: str, *, platform: str | None = None) -> tuple[str,
     cleaned = (url or "").strip()
     want = (platform or "").strip().lower()
     if want not in {"copart", "bidcars"}:
-        want = "bidcars" if is_bidcars_url(cleaned) else "copart"
+        # Авто: по URL, если площадку не задали (вкладка «Восстановление»)
+        if is_bidcars_url(cleaned) or is_bidcars_search_url(cleaned):
+            want = "bidcars"
+        else:
+            want = "copart"
     if want == "bidcars":
         if not cleaned:
             raise HTTPException(400, "Вставьте URL поиска с Bid.cars")
@@ -95,7 +100,7 @@ def normalize_search_url(url: str, *, platform: str | None = None) -> tuple[str,
     if not cleaned:
         raise HTTPException(400, "Вставьте URL поиска с Copart")
     if is_bidcars_url(cleaned) or is_bidcars_search_url(cleaned):
-        raise HTTPException(400, "Это ссылка Bid.cars — добавьте её во вкладке Bid.cars")
+        raise HTTPException(400, "Это ссылка Bid.cars — добавьте её во вкладке Bid.cars или «Восстановление»")
     if cleaned.startswith("http://") or cleaned.startswith("https://"):
         return cleaned, "copart"
     if cleaned.startswith("www."):
@@ -163,14 +168,52 @@ class IaaiQuoteIn(BaseModel):
     primary_damage: str | None = None
     documents: str | None = None
     images: list[str] | None = None
+    purpose: str | None = None
+    vehicle_size: str | None = None
+    auction_platform: str | None = None
+    ocean_destination: str | None = None
+    title_code: str | None = None
+    is_sublot: bool | None = None
+    sublot_location: str | None = None
+    auction_fees_usd: float | None = None
+
+
+class SublotCheckIn(BaseModel):
+    auction_url: str | None = None
+    auction_platform: str | None = None
+    lot_id: str | None = None
 
 
 class BidcarsLookupIn(BaseModel):
     url: str
 
 
+class CustomsByIn(BaseModel):
+    price_usd: float | None = None
+    price_eur: float | None = None
+    engine_cc: int | None = None
+    year: int | None = None
+    age_band: str | None = None
+    engine_type: str | None = None
+    fuel: str | None = None
+    engine: str | None = None
+    title: str | None = None
+    person: str = "individual"
+    benefit_50: bool = False
+    include_epts: bool = True
+    eur_byn: float | None = None
+    usd_byn: float | None = None
+    rates_auto: bool = True
+
+
 class FxRateIn(BaseModel):
     fx_rate: float
+
+
+class BynRatesIn(BaseModel):
+    eur_byn: float | None = None
+    usd_byn: float | None = None
+    auto: bool = False
 
 
 class BamperSearchIn(BaseModel):
@@ -366,7 +409,7 @@ def telegram_notify(token: str, chat_id: str, lot: dict) -> None:
 def persist_searches() -> None:
     items = [
         Search(name=row["name"], url=row["url"])
-        for row in store.list_searches(platform="copart")
+        for row in store.list_searches(platform="copart", kind="client")
         if row["enabled"]
     ]
     try:
@@ -452,10 +495,14 @@ def index():
 def auth_config(request: Request) -> dict:
     username = bot_username()
     user = getattr(request.state, "user", None)
+    poll_ok = store.get_meta("telegram_poll_ok")
+    poll_error = store.get_meta("telegram_poll_error") or ""
     return {
         "configured": bool(current_settings().telegram_token and username),
         "bot_username": username,
         "user": user,
+        "telegram_poll_ok": None if poll_ok is None else poll_ok == "1",
+        "telegram_poll_error": poll_error or None,
     }
 
 
@@ -534,21 +581,31 @@ def patch_user(user_id: int, body: UserPatch, request: Request) -> dict:
 
 
 @app.get("/api/state")
-def state(request: Request, platform: str | None = None) -> dict:
-    plat = (platform or "copart").strip().lower()
-    if plat not in {"copart", "bidcars"}:
-        plat = "copart"
+def state(request: Request, platform: str | None = None, kind: str | None = None) -> dict:
+    search_kind = (kind or "client").strip().lower()
+    if search_kind not in {"client", "restoration"}:
+        search_kind = "client"
+    plat = (platform or "").strip().lower() or None
+    if search_kind == "client":
+        if plat not in {"copart", "bidcars"}:
+            plat = "copart"
+    else:
+        plat = None
     return {
-        "stats": store.stats(platform=plat),
+        "stats": store.stats(platform=plat, kind=search_kind),
         "sync": store.sync_status(),
-        "searches": store.list_searches(platform=plat),
-        "platform": plat,
+        "searches": store.list_searches(platform=plat, kind=search_kind),
+        "platform": plat or "restoration",
+        "kind": search_kind,
         "interval_minutes": current_settings().poll_interval_minutes,
         "telegram": bool(current_settings().telegram_token),
         "notify_count": len(store.notify_chat_ids()),
         "me": getattr(request.state, "user", None),
         "fx_rate": current_fx_rate(),
         "fx_source": _fx_source_cache or store.get_meta("fx_rate_source"),
+        "eur_byn": store.get_byn_rates().get("eur_byn"),
+        "usd_byn": store.get_byn_rates().get("usd_byn"),
+        "byn_rates_source": store.get_byn_rates().get("source"),
     }
 
 
@@ -563,6 +620,36 @@ def set_fx_rate(body: FxRateIn) -> dict:
     return {"fx_rate": rate, "fx_source": "manual"}
 
 
+@app.post("/api/settings/byn-rates")
+def set_byn_rates(body: BynRatesIn) -> dict:
+    if body.auto:
+        from customs_by import fetch_nbrb_rates
+
+        rates = fetch_nbrb_rates(force=True)
+        saved = store.set_byn_rates(
+            eur_byn=float(rates.get("EUR") or 0) or None,
+            usd_byn=float(rates.get("USD") or 0) or None,
+            source="auto",
+        )
+        return {
+            "eur_byn": saved.get("eur_byn"),
+            "usd_byn": saved.get("usd_byn"),
+            "source": saved.get("source"),
+        }
+    if (body.eur_byn is None or body.eur_byn <= 0) and (body.usd_byn is None or body.usd_byn <= 0):
+        raise HTTPException(400, "Укажите курсы EUR и/или USD больше 0")
+    saved = store.set_byn_rates(
+        eur_byn=body.eur_byn,
+        usd_byn=body.usd_byn,
+        source="manual",
+    )
+    return {
+        "eur_byn": saved.get("eur_byn"),
+        "usd_byn": saved.get("usd_byn"),
+        "source": saved.get("source"),
+    }
+
+
 @app.get("/api/lots")
 def lots(
     status: str | None = None,
@@ -571,6 +658,7 @@ def lots(
     stock: str = "in",
     feed: bool = False,
     source: str | None = None,
+    kind: str | None = None,
 ) -> list[dict]:
     in_stock: bool | None
     if stock == "all":
@@ -579,9 +667,16 @@ def lots(
         in_stock = False
     else:
         in_stock = True
-    src = (source or "copart").strip().lower()
-    if src not in {"copart", "bidcars"}:
-        src = "copart"
+    search_kind = (kind or "client").strip().lower()
+    if search_kind not in {"client", "restoration"}:
+        search_kind = "client"
+    src = (source or "").strip().lower() or None
+    if search_kind == "client":
+        if src not in {"copart", "bidcars"}:
+            src = "copart"
+    else:
+        # Восстановление: лоты с обеих площадок
+        src = src if src in {"copart", "bidcars"} else None
     return store.list_lots(
         status=status or None,
         search=search or None,
@@ -589,6 +684,7 @@ def lots(
         in_stock=in_stock,
         feed=feed,
         source=src,
+        kind=search_kind,
     )
 
 
@@ -606,7 +702,12 @@ def patch_lot(lot_id: str, body: LotPatch) -> dict:
 @app.post("/api/searches")
 def add_search(body: SearchIn, request: Request) -> dict:
     user = _request_user(request)
-    url, platform = normalize_search_url(body.url, platform=body.platform)
+    search_kind = (body.kind or "client").strip().lower()
+    if search_kind not in {"client", "restoration"}:
+        search_kind = "client"
+    # Для восстановления площадку берём из URL; для клиентских вкладок — из platform
+    plat_hint = None if search_kind == "restoration" else body.platform
+    url, platform = normalize_search_url(body.url, platform=plat_hint)
     name = body.name.strip()
     row = store.add_search(
         name,
@@ -616,6 +717,7 @@ def add_search(body: SearchIn, request: Request) -> dict:
         client_phone=body.client_phone,
         owner_user_id=user.get("id"),
         platform=platform,
+        kind=search_kind,
     )
     persist_searches()
     if row.get("id") and not row.get("seeded_at"):
@@ -659,14 +761,27 @@ def remove_search(search_id: int) -> dict:
 
 
 @app.post("/api/sync")
-def sync_now(platform: str | None = None) -> dict:
+def sync_now(platform: str | None = None, kind: str | None = None) -> dict:
     plat = (platform or "").strip().lower() or None
+    search_kind = (kind or "").strip().lower() or None
     if plat not in {None, "copart", "bidcars"}:
         plat = None
+    if search_kind not in {None, "client", "restoration"}:
+        search_kind = None
+    if search_kind == "restoration":
+        plat = None
+    elif plat in {"copart", "bidcars"} and not search_kind:
+        search_kind = "client"
     if not SYNC_LOCK.acquire(blocking=False):
         raise HTTPException(409, "Синхронизация уже идёт")
     try:
-        result = run_cycle_safe(current_settings(), store, notify=telegram_notify, platform=plat)
+        result = run_cycle_safe(
+            current_settings(),
+            store,
+            notify=telegram_notify,
+            platform=plat,
+            kind=search_kind,
+        )
         return result
     except CopartBlockedError as exc:
         raise HTTPException(503, str(exc)) from exc
@@ -817,12 +932,77 @@ def telegram_send_me(body: TelegramMessagesIn, request: Request) -> dict:
     return {"ok": True, "sent": len(texts)}
 
 
+@app.get("/api/calc/title-tariffs")
+def title_tariffs() -> dict:
+    from usa_title import list_title_tariffs
+
+    return {"items": list_title_tariffs()}
+
+
+@app.post("/api/calc/customs-by")
+def calc_customs_by(body: CustomsByIn) -> dict:
+    from customs_by import calculate_customs_by, fetch_nbrb_rates
+
+    rates = None
+    if body.rates_auto:
+        fetched = fetch_nbrb_rates()
+        rates = {
+            "EUR": float(fetched.get("EUR") or 0) or 3.45,
+            "USD": float(fetched.get("USD") or 0) or 3.2,
+            "_usd_eur": float(fetched.get("_usd_eur") or 0) or 0.92,
+        }
+        # обновить сохранённые авто-курсы (тихо)
+        try:
+            store.set_byn_rates(
+                eur_byn=rates["EUR"],
+                usd_byn=rates["USD"],
+                source="auto",
+            )
+        except Exception:
+            pass
+    else:
+        saved = store.get_byn_rates()
+        eur = body.eur_byn if body.eur_byn and body.eur_byn > 0 else saved.get("eur_byn")
+        usd = body.usd_byn if body.usd_byn and body.usd_byn > 0 else saved.get("usd_byn")
+        if not eur or not usd:
+            fetched = fetch_nbrb_rates()
+            eur = eur or float(fetched.get("EUR") or 3.45)
+            usd = usd or float(fetched.get("USD") or 3.2)
+        rates = {
+            "EUR": float(eur),
+            "USD": float(usd),
+            "_usd_eur": float(usd) / float(eur) if eur else 0.92,
+        }
+
+    result = calculate_customs_by(
+        price_usd=body.price_usd,
+        price_eur=body.price_eur,
+        engine_cc=body.engine_cc,
+        year=body.year,
+        age_band=body.age_band,
+        engine_type=body.engine_type,
+        fuel=body.fuel,
+        engine=body.engine,
+        title=body.title,
+        person=body.person or "individual",
+        benefit_50=bool(body.benefit_50),
+        include_epts=bool(body.include_epts),
+        rates=rates,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "Не удалось посчитать растаможку")
+    if result.get("rates"):
+        result["rates"]["source"] = "auto" if body.rates_auto else "manual"
+    return result
+
+
 @app.post("/api/calc/iaai")
 def calc_iaai(body: IaaiQuoteIn) -> dict:
     if body.bid is None or body.bid < 0:
         raise HTTPException(400, "Укажите ставку")
     method = "proxy" if str(body.bid_method or "").lower() == "proxy" else "live"
     volume = "high" if str(body.volume or "").lower() == "high" else "standard"
+    purpose = "restoration" if str(body.purpose or "").lower() == "restoration" else "iaai"
     quote = quote_iaai(
         bid=body.bid,
         title=body.title,
@@ -844,6 +1024,15 @@ def calc_iaai(body: IaaiQuoteIn) -> dict:
         miles_to_houston=body.miles_to_houston,
         distance_source=body.distance_source,
         include_america_delivery=bool(body.include_america_delivery),
+        purpose=purpose,
+        vehicle_size=body.vehicle_size,
+        auction_platform=body.auction_platform,
+        ocean_destination=body.ocean_destination,
+        documents=body.documents,
+        title_code=body.title_code or body.documents,
+        is_sublot=body.is_sublot,
+        sublot_location=body.sublot_location,
+        auction_fees_usd=body.auction_fees_usd,
     )
     if not quote:
         raise HTTPException(400, "Не удалось посчитать")
@@ -888,19 +1077,31 @@ def calc_iaai(body: IaaiQuoteIn) -> dict:
 @app.post("/api/calc/usa-lookup")
 def calc_bidcars_lookup(body: BidcarsLookupIn) -> dict:
     raw = (body.url or "").strip()
+    from usa_auction import detect_usa_source
+
+    source = detect_usa_source(raw)
+    if not source:
+        # lot id only → try bid.cars as before
+        try:
+            from bidcars import normalize_bidcars_url
+
+            normalize_bidcars_url(raw)
+            source = "bidcars"
+        except Exception:
+            raise HTTPException(
+                400,
+                "Нужна ссылка Copart.com, IAAI.com или Bid.cars на лот",
+            ) from None
+
+    log.info("Калькулятор USA: %s → %s", source, raw[:120])
     try:
-        canonical = normalize_bidcars_url(raw)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    log.info("Калькулятор: открываю Bid.cars %s", parse_bidcars_lot_id(canonical))
-    try:
-        details = get_scrape_service(settings.headless).fetch_bidcars_lot(canonical)
+        details = get_scrape_service(settings.headless).fetch_usa_lot(raw)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except CopartBlockedError as exc:
         raise HTTPException(503, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(500, f"Не удалось открыть Bid.cars: {exc}") from exc
+        raise HTTPException(500, f"Не удалось открыть лот ({source}): {exc}") from exc
 
     classified = classify_vehicle(
         " ".join(part for part in (details.get("body_style"), details.get("title")) if part)
@@ -910,6 +1111,7 @@ def calc_bidcars_lookup(body: BidcarsLookupIn) -> dict:
     ocean = (details.get("ocean_usd_by_port") or {}).get(port)
     if ocean is None:
         ocean = ocean_default(port)
+    auction_platform = str(details.get("auction_platform") or ("copart" if source == "copart" else "iaai"))
     bid = details.get("bid")
     quote = None
     quote_text = None
@@ -924,7 +1126,7 @@ def calc_bidcars_lookup(body: BidcarsLookupIn) -> dict:
             inland_usd=details.get("inland_usd"),
             inland_miles=details.get("inland_miles"),
             ocean_usd=ocean,
-            bidcars_fee_usd=details.get("bidcars_fee_usd"),
+            bidcars_fee_usd=details.get("bidcars_fee_usd") or 0,
             destination_port=port,
             ship_from=details.get("ship_from"),
             location=details.get("location"),
@@ -934,15 +1136,37 @@ def calc_bidcars_lookup(body: BidcarsLookupIn) -> dict:
             miles_to_houston=details.get("miles_to_houston"),
             distance_source=details.get("distance_source"),
             include_america_delivery=True,
+            purpose="iaai",
+            auction_platform=auction_platform,
+            documents=details.get("documents") or details.get("title_code"),
+            title_code=details.get("title_code") or details.get("documents"),
+            is_sublot=bool(details.get("is_sublot")),
+            sublot_location=details.get("sublot_location"),
         )
         if quote:
             quote_text = format_iaai_quote_text(details, quote)
-    details["auction"] = "iaai"
-    details["source"] = details.get("source") or "bidcars"
+    details["auction"] = auction_platform
+    details["source"] = details.get("source") or source
     details["quote"] = quote
     details["quote_text"] = quote_text
     details["history_id"] = _persist_calc_history(details)
     return details
+
+
+@app.post("/api/calc/check-sublot")
+def calc_check_sublot(body: SublotCheckIn) -> dict:
+    """После показа цены: открыть Copart/IAAI и проверить Sublot/Offsite (+$100)."""
+    try:
+        result = get_scrape_service(settings.headless).check_usa_sublot(
+            auction_url=body.auction_url,
+            auction_platform=body.auction_platform,
+            lot_id=body.lot_id,
+        )
+    except CopartBlockedError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"Не удалось проверить Sublot/Offsite: {exc}") from exc
+    return result
 
 
 @app.get("/api/calc/history")

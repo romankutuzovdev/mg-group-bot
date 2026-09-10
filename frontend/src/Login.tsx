@@ -4,7 +4,16 @@ import { api } from "./api";
 import { useAuth } from "./Auth";
 
 export default function Login() {
-  const { user, loading, configured, botUsername, setUser, refresh } = useAuth();
+  const {
+    user,
+    loading,
+    configured,
+    botUsername,
+    telegramPollOk,
+    telegramPollError,
+    setUser,
+    refresh,
+  } = useAuth();
   const [waiting, setWaiting] = useState(false);
   const [botUrl, setBotUrl] = useState("");
   const [error, setError] = useState("");
@@ -13,6 +22,14 @@ export default function Login() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const timer = window.setInterval(() => {
+      void refresh().catch(() => undefined);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [waiting, refresh]);
 
   const start = async () => {
     setError("");
@@ -88,6 +105,12 @@ export default function Login() {
           </p>
         ) : (
           <>
+            {telegramPollOk === false ? (
+              <p className="error">
+                {telegramPollError ||
+                  "Бот не получает сообщения: тот же TELEGRAM_BOT_TOKEN уже слушает другой app.py (другой ПК/терминал). Оставьте один бэкенд или перевыпустите токен у @BotFather."}
+              </p>
+            ) : null}
             <button className="btn auth-btn" type="button" onClick={() => void start()} disabled={waiting && !expired}>
               {waiting && !expired ? "Жду подтверждение в Telegram…" : "Войти через Telegram"}
             </button>
