@@ -635,7 +635,7 @@ export default function Calculator() {
                   </label>
                   <label className="check">
                     <input type="radio" checked={dismantleMode === "weight"} onChange={() => setDismantleMode("weight")} />
-                    По весу — 800 USD + 1.6 × кг
+                    По весу — 850 USD + 1.4 × кг
                   </label>
                 </div>
                 {dismantleMode === "weight" ? (

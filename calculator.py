@@ -9,8 +9,9 @@ LOT_RETRIEVAL_FEE = 50.0
 # Fee A — high volume: 12+ авто за текущий или прошлый календарный год (официально Copart UK).
 # Fee B — low volume: меньше 12 авто.
 DEFAULT_BUYER_FEE_TIER = "A"
-DISMANTLE_WEIGHT_BASE = 800.0
-DISMANTLE_WEIGHT_PER_KG = 1.6
+# Прайс Англии от 14.09.2026: 850 USD + 1.4 USD/кг
+DISMANTLE_WEIGHT_BASE = 850.0
+DISMANTLE_WEIGHT_PER_KG = 1.4
 DISMANTLE_FROM_TYPE = {
     "sedan": "car",
     "suv": "suv",
@@ -41,11 +42,12 @@ DELIVERY_RATES = {
 
 DELIVERY_COLUMN_LABEL = {"sedan": "Седан", "jeep": "Джип", "bus": "Бус"}
 
+# Прайс Англии от 14.09.2026: Седан / Внедорожник / Пикап·X7·LR
 DISMANTLE_TARIFFS_USD = {
-    "sedan": 2200,
-    "suv": 2450,
-    "sprinter": 2350,
-    "pickup": 2650,
+    "sedan": 2250,
+    "suv": 2550,
+    "sprinter": 2350,  # в прайсе нет отдельной колонки — оставляем между седаном и SUV
+    "pickup": 2850,
 }
 
 COPART_BODY_RULES = [
@@ -364,7 +366,7 @@ def format_quote_text(lot: dict, quote: dict) -> str:
     if quote.get("dismantle_mode") == "weight" and quote.get("dismantle_kg"):
         kg = quote["dismantle_kg"]
         lines.append(
-            f"Разбор: ${quote['dismantle_usd']:,.2f} (800 USD + 1.6 × {kg:g} кг)"
+            f"Разбор: ${quote['dismantle_usd']:,.2f} (850 USD + 1.4 × {kg:g} кг)"
         )
     else:
         lines.append(f"Разбор: ${quote['dismantle_usd']:,.2f} ({quote['dismantle_type']})")

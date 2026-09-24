@@ -82,6 +82,25 @@ def normalize_size(vehicle_size: str | None) -> str:
     return SIZE_ALIASES.get(raw, "regular")
 
 
+def size_from_dismantle_type(dismantle_type: str | None) -> str:
+    """Тип разбора / кузов → ключ прайса regular|oversize|moto."""
+    raw = str(dismantle_type or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if raw in {"moto", "motorcycle", "bike", "atv"}:
+        return "moto"
+    if raw in {
+        "bus",
+        "truck",
+        "pickup",
+        "frame_suv",
+        "van",
+        "sprinter",
+        "oversize",
+        "oversized",
+    }:
+        return "oversize"
+    return "regular"
+
+
 def normalize_auction(auction: str | None) -> str:
     a = str(auction or "").strip().lower()
     if "copart" in a:
@@ -295,4 +314,37 @@ def lookup_usa_delivery(
             "selected_inland_usd": float(inland),
             "selected_ocean_usd": float(ocean or 0),
         },
+    }
+
+
+def resolve_inland_from_tariff(
+    location: str | None,
+    *,
+    auction: str | None = None,
+    vehicle_size: str | None = None,
+    dismantle_type: str | None = None,
+    ocean_destination: str = "klaipeda",
+) -> dict | None:
+    """Inland из прайса всех площадок Copart/IAAI (вместо миль)."""
+    size = vehicle_size or size_from_dismantle_type(dismantle_type)
+    return lookup_usa_delivery(
+        location,
+        size,
+        auction=auction or "iaai",
+        ocean_destination=ocean_destination,
+    )
+
+
+def list_all_yards() -> dict:
+    """Все локации из прайса: copart + iaai."""
+    data = _load()
+    return {
+        "source": data.get("source"),
+        "sizes": data.get("sizes") or ["regular", "oversize", "moto"],
+        "size_labels": data.get("size_labels") or {},
+        "ports": data.get("ports") or {},
+        "copart": list(data.get("copart") or []),
+        "iaai": list(data.get("iaai") or []),
+        "copart_count": len(data.get("copart") or []),
+        "iaai_count": len(data.get("iaai") or []),
     }

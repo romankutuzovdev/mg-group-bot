@@ -386,7 +386,7 @@ export default function IaaiCalculator({
                 {isRestoration
                   ? "Аукционные сборы — с Bid.cars. Доставка до порта и море — из прайса MG GROUP по размеру: Regular / Large, Oversize, Moto."
                   : isCopartUs
-                    ? "Аукционные сборы — официальная сетка Copart USA для licensed business и secured payment. 12+ авто недостаточно для High Volume в США."
+                    ? "Аукционные сборы — официальная сетка Copart USA. До разборки США: ближе NJ или Houston, $1 = 1 миля."
                     : "Аукционные сборы — как на аккаунте IAAI (Standard по умолчанию). До разборки США: ближе NJ или Houston, $1 = 1 миля."}
               </p>
               {lot ? (
@@ -592,7 +592,7 @@ export default function IaaiCalculator({
 
             {isRestoration ? (
               <>
-                <label className="hint">Размер машины</label>
+                <label className="hint">Размер для доставки (прайс)</label>
                 <div className="segment">
                   {RESTORATION_SIZE_OPTIONS.map((opt) => (
                     <label className="check" key={opt.key}>

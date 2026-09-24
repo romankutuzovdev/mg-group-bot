@@ -14,9 +14,9 @@ TELEGRAM_API = "https://api.telegram.org"
 
 _DISMANTLE_LABEL = {
     "sedan": "Седан",
-    "suv": "SUV / джип",
+    "suv": "Внедорожник",
     "sprinter": "Спринтер / бус",
-    "pickup": "Пикап",
+    "pickup": "Пикап / X7 / LR",
 }
 
 
@@ -165,7 +165,7 @@ def format_lot(lot: dict) -> str:
         if quote.get("dismantle_mode") == "weight" and quote.get("dismantle_kg"):
             lines.append(
                 f"Разбор: {_usd(quote.get('dismantle_usd'))} "
-                f"(800 + 1.6 × {quote['dismantle_kg']:g} кг)"
+                f"(850 + 1.4 × {quote['dismantle_kg']:g} кг)"
             )
         else:
             lines.append(f"Разбор: {_usd(quote.get('dismantle_usd'))} ({_esc(dtype)})")

@@ -5,8 +5,11 @@ from calculator import (
     round2,
 )
 
-# Комиссия за перевод для расчётов USA (IAAI / восстановление)
-USA_TRANSFER_FEE_RATE = 0.035
+# Комиссия за перевод:
+#   IAAI / Bid.cars (разбор USA) — 3%
+#   авто под восстановление — 3.5% (отдельный калькулятор)
+USA_TRANSFER_FEE_RATE = 0.03
+RESTORATION_TRANSFER_FEE_RATE = 0.035
 # Copart Sublot / IAAI Offsite — доплата за вывоз с дополнительной площадки
 SUBLOT_FEE_USD = 100.0
 
@@ -24,7 +27,9 @@ IAAI_TITLE_FEE = 20.0
 # алиасы для старого кода
 IAAI_SERVICE_FEE = IAAI_SERVICE_FEE_STANDARD
 IAAI_ENVIRONMENTAL_FEE = IAAI_ENVIRONMENTAL_FEE_STANDARD
-USA_DISPATCHING_USD = 250.0
+# Диспетчинг: разбор USA $200; восстановление $250
+USA_DISPATCHING_USD = 200.0
+RESTORATION_DISPATCHING_USD = 250.0
 USA_DISMANTLE_WEIGHT_BASE = 1300.0
 USA_DISMANTLE_WEIGHT_PER_KG = 2.2
 
@@ -484,8 +489,7 @@ def quote_iaai(
 
         tariff = None
         if is_restoration:
-            # Для восстановления inland/море — из прайса Copart/IAAI + B2B, не мили.
-            # Клиентский inland_usd с lookup миль игнорируем.
+            # Восстановление: inland/море из прайса Copart/IAAI + B2B
             tariff = lookup_usa_delivery(
                 location,
                 size_raw or "regular",
@@ -494,11 +498,17 @@ def quote_iaai(
             )
 
         route = None
-        if not tariff and (inland_usd in (None, "") or inland_miles in (None, "")):
+        # Машинокомплект: всегда мили NJ/Houston ($1/mi). Восстановление — мили только если нет прайса.
+        need_miles = (not is_restoration) or (
+            not tariff and (inland_usd in (None, "") or inland_miles in (None, ""))
+        )
+        if need_miles:
             route = resolve_us_inland(location, None, allow_chrome_maps=False)
 
         if tariff and tariff.get("inland_usd") is not None:
             inland = round2(tariff["inland_usd"])
+        elif not is_restoration and route and route.get("inland_usd") is not None:
+            inland = round2(route["inland_usd"])
         elif inland_usd not in (None, "") and not is_restoration:
             inland = round2(inland_usd)
         elif route and route.get("inland_usd") is not None:
@@ -523,12 +533,12 @@ def quote_iaai(
             chosen_us_label = us_port_label or (route or {}).get("us_port_label")
             nj = miles_to_new_jersey if miles_to_new_jersey not in (None, "") else (route or {}).get("miles_to_new_jersey")
             hu = miles_to_houston if miles_to_houston not in (None, "") else (route or {}).get("miles_to_houston")
-            src = distance_source or (route or {}).get("distance_source")
+            src = distance_source or (route or {}).get("distance_source") or "miles $1/mi"
 
         ocean = 0.0
         if ocean_usd not in (None, ""):
             ocean = round2(ocean_usd)
-        elif tariff and tariff.get("ocean_usd") is not None:
+        elif is_restoration and tariff and tariff.get("ocean_usd") is not None:
             ocean = round2(tariff["ocean_usd"])
         elif is_restoration and size_raw:
             ocean = round2(RESTORATION_OCEAN_USD.get(size_raw, RESTORATION_OCEAN_USD["regular"]))
@@ -564,8 +574,9 @@ def quote_iaai(
     elif is_restoration and (title_doc_usd or sublot_usd):
         america_subtotal = round2(iaai["iaai_total"] + title_doc_usd + sublot_usd)
 
-    dispatching = USA_DISPATCHING_USD
-    transfer_fee = round2(america_subtotal * USA_TRANSFER_FEE_RATE)
+    dispatching = RESTORATION_DISPATCHING_USD if is_restoration else USA_DISPATCHING_USD
+    transfer_rate = RESTORATION_TRANSFER_FEE_RATE if is_restoration else USA_TRANSFER_FEE_RATE
+    transfer_fee = round2(america_subtotal * transfer_rate)
     usa_with_fees = round2(america_subtotal + dispatching + transfer_fee)
 
     return {
@@ -578,7 +589,7 @@ def quote_iaai(
         "subtotal_usa": america_subtotal,
         "dispatching_usd": dispatching,
         "transfer_fee": transfer_fee,
-        "transfer_fee_rate": USA_TRANSFER_FEE_RATE,
+        "transfer_fee_rate": transfer_rate,
         "usa_with_fees": usa_with_fees,
         "dismantle_usd": dismantle,
         "dismantle_type": classified["dismantle_type"],
@@ -708,7 +719,12 @@ def format_iaai_quote_text(lot: dict, quote: dict) -> str:
         lines.append(f"Sublot / Offsite: {addr} → ${fee:,.2f}")
     lines.append("")
     lines.append(f"Диспетчинг: ${quote['dispatching_usd']:,.2f}")
-    rate_pct = float(quote.get("transfer_fee_rate") or USA_TRANSFER_FEE_RATE) * 100
+    default_rate = (
+        RESTORATION_TRANSFER_FEE_RATE
+        if quote.get("purpose") == "restoration"
+        else USA_TRANSFER_FEE_RATE
+    )
+    rate_pct = float(quote.get("transfer_fee_rate") or default_rate) * 100
     lines.append(
         f"Комиссия за перевод {rate_pct:g}%: ${quote['transfer_fee']:,.2f}"
         f" (${quote['subtotal_usa']:,.2f} × {rate_pct:g}%)"

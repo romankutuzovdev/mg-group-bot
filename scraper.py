@@ -7,6 +7,7 @@ import random
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -102,6 +103,8 @@ BLOCK_HINTS = (
 HOME_URL = "https://www.copart.co.uk/"
 DEFAULT_PAGE_CAP = 8
 DEFAULT_CDP_PORT = 9222
+# Headless-служба на Windows — отдельный порт, чтобы не цепляться к замороженному GUI Chrome
+SERVER_CDP_PORT = 9223
 INSPECT_URL = "chrome://inspect/#remote-debugging"
 CREATE_NO_WINDOW = 0x08000000
 
@@ -693,8 +696,20 @@ def _popen(args: list[str]) -> None:
     subprocess.Popen(args, **kwargs)
 
 
+def _popen_chrome(args: list[str]) -> None:
+    """Запуск Chrome с окном (CREATE_NO_WINDOW прячет GUI и ломает вкладки в службе)."""
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — без скрытия окна
+        kwargs["creationflags"] = 0x00000008 | 0x00000200
+    subprocess.Popen(args, **kwargs)
+
+
 def _bot_chrome_user_data() -> Path:
-    """Отдельный профиль Chrome для CDP — не мешает обычному браузеру пользователя."""
+    """Запасной профиль CDP, если обычный Chrome User Data недоступен."""
     path = Path(__file__).resolve().parent / "data" / "chrome-cdp-profile"
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -716,38 +731,350 @@ def _quit_chrome_macos() -> None:
         time.sleep(0.4)
 
 
+def _quit_chrome_windows() -> None:
+    """Закрыть Chrome/Edge, чтобы перезапустить с --remote-debugging-port и тем же профилем (VPN)."""
+    for image in ("chrome.exe", "msedge.exe"):
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", image, "/F"],
+                capture_output=True,
+                timeout=30,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+    for _ in range(30):
+        if not _chrome_running():
+            return
+        time.sleep(0.4)
+
+
+def _quit_chrome() -> None:
+    if sys.platform == "darwin":
+        _quit_chrome_macos()
+    elif os.name == "nt":
+        _quit_chrome_windows()
+
+
+def _activate_chrome() -> None:
+    """Вывести Chrome на передний план (калькулятор / капча)."""
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    'tell application "Google Chrome" to activate',
+                ],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+        return
+    if os.name == "nt":
+        try:
+            # PowerShell: найти окно Chrome и вывести наверх
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Add-Type -Name Win -Namespace Native -MemberDefinition '"
+                        "[DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);"
+                        "[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h, int n);"
+                        "'; "
+                        "$p = Get-Process chrome -ErrorAction SilentlyContinue | "
+                        "Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; "
+                        "if ($p) { [Native.Win]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; "
+                        "[Native.Win]::SetForegroundWindow($p.MainWindowHandle) | Out-Null }"
+                    ),
+                ],
+                capture_output=True,
+                timeout=8,
+                creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception:
+            pass
+
+
+def _focus_page(page: Any) -> None:
+    """Вкладка Playwright + окно Chrome на передний план."""
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    _activate_chrome()
+
+
+def _lot_tab_focus() -> bool:
+    """Показывать Chrome при лоте: на Mac — да; на Windows-сервере — нет."""
+    return os.name != "nt" and not _chrome_headless_cdp()
+
+
+def _env_flag(name: str) -> bool:
+    try:
+        from config import load_dotenv_once
+
+        load_dotenv_once()
+    except Exception:
+        pass
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _chrome_allow_kill() -> bool:
+    """
+    Убивать процесс Chrome только при CHROME_ALLOW_KILL=1.
+    По умолчанию — нет: бот только подключается к уже открытому окну
+    (после kill Chrome часто не поднимается, VPN/сессия теряются).
+    """
+    return _env_flag("CHROME_ALLOW_KILL")
+
+
+def _calc_recycle_mode() -> str:
+    """
+    После каждого расчёта в калькуляторе:
+      off    — не трогать вкладки/Chrome (по умолчанию — сессия Copart живёт)
+      tab    — только новая вкладка лотов
+      chrome — полностью перезапустить Chrome (только с CHROME_ALLOW_KILL=1)
+    CHROME_RESTART_AFTER_LOT=off|tab|chrome
+    """
+    raw = (os.getenv("CHROME_RESTART_AFTER_LOT") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return "off"
+    if raw in {"tab", "page", "tabs"}:
+        return "tab"
+    if raw in {"1", "true", "yes", "on", "chrome", "full", "process"}:
+        return "chrome"
+    # Как раньше: после лота ничего не сбрасываем — иначе Incapsula снова просит проверку
+    return "off"
+
+
+def _is_calc_lot_kind(kind: str | None) -> bool:
+    return kind in {
+        "lot",
+        "bidcars_lot",
+        "copart_us_lot",
+        "iaai_lot",
+        "usa_sublot",
+        "ny_dmv_lien",
+    }
+
+
+def _chrome_headless_cdp() -> bool:
+    """
+    Headless Chrome с CDP — только если явно включили CHROME_HEADLESS_CDP=1.
+    Для вашего Chrome с VPN-расширением оставляйте выключенным (HEADLESS=false).
+    """
+    return _env_flag("CHROME_HEADLESS_CDP")
+
+
+def _cdp_port() -> int:
+    env = (os.getenv("CHROME_CDP_PORT") or "").strip()
+    if env.isdigit():
+        return int(env)
+    if _chrome_headless_cdp():
+        return SERVER_CDP_PORT
+    return DEFAULT_CDP_PORT
+
+
+def _cdp_responsive(port: int | None = None, timeout: float = 2.5) -> bool:
+    """TCP-порт может быть открыт у зависшего после RDP Chrome — проверяем ответ DevTools."""
+    port = int(port or _cdp_port())
+    if not _port_open(port):
+        return False
+    import urllib.error
+    import urllib.request
+
+    for path in ("/json/version", "/json/list"):
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}{path}",
+                timeout=timeout,
+            ) as resp:
+                resp.read(512)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _windows_chrome_stability_args() -> list[str]:
+    """Флаги, чтобы Chrome реже замирал после Disconnect RDP (без GPU/комpositor сессии)."""
+    return [
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-software-rasterizer",
+        "--in-process-gpu",
+        "--force-device-scale-factor=1",
+        "--window-size=1920,1080",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+
+
+def _chrome_proxy_server() -> str | None:
+    try:
+        from config import load_dotenv_once
+
+        load_dotenv_once()
+    except Exception:
+        pass
+    for key in ("CHROME_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        raw = (os.getenv(key) or "").strip()
+        if not raw:
+            continue
+        return raw
+    return None
+
+
+def _clear_chrome_profile_locks(user_data: Path) -> None:
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        path = user_data / name
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _kill_listeners_on_port(port: int) -> None:
+    """Убить только процесс на CDP-порту (headless), не трогая обычный Chrome пользователя."""
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    f"$c = Get-NetTCPConnection -LocalPort {int(port)} -State Listen "
+                    "-ErrorAction SilentlyContinue; "
+                    "foreach ($x in $c) { Stop-Process -Id $x.OwningProcess -Force -ErrorAction SilentlyContinue }"
+                ),
+            ],
+            capture_output=True,
+            timeout=20,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
+def _wait_for_cdp(port: int | None = None, seconds: float = 45.0) -> bool:
+    """Ждать живой DevTools, не трогая процесс Chrome."""
+    port = int(port or _cdp_port())
+    deadline = time.time() + max(1.0, seconds)
+    while time.time() < deadline:
+        if _cdp_responsive(port, timeout=1.5):
+            return True
+        time.sleep(0.4)
+    return _cdp_responsive(port, timeout=1.5)
+
+
 def _launch_chrome_cdp() -> None:
-    """Открыть Chrome с --remote-debugging-port=9222 (нужно для Playwright/CDP)."""
+    """Открыть Chrome с --remote-debugging-port (нужно для Playwright/CDP)."""
     exe = _chrome_exe()
     if exe is None:
         raise RuntimeError("Не найден Google Chrome")
-    if _port_open(DEFAULT_CDP_PORT):
+    cdp_port = _cdp_port()
+    server_mode = _chrome_headless_cdp()
+
+    if _cdp_responsive(cdp_port):
         return
 
-    user_data = _bot_chrome_user_data()
+    if server_mode:
+        # Не убиваем GUI Chrome пользователя — только зависший headless на 9223
+        if _port_open(cdp_port):
+            log.warning("Headless CDP на порту %s завис — перезапускаю только его", cdp_port)
+            _kill_listeners_on_port(cdp_port)
+            time.sleep(1.0)
+        if (os.getenv("CHROME_USER_DATA_DIR") or "").strip() and not _env_flag(
+            "CHROME_USE_BOT_PROFILE"
+        ):
+            user_data = _preferred_chrome_user_data()
+        else:
+            user_data = _bot_chrome_user_data()
+        _clear_chrome_profile_locks(user_data)
+    else:
+        # Уже открытый Chrome — не убиваем: ждём CDP или подключаемся
+        if _chrome_running() or _port_open(cdp_port):
+            if _chrome_allow_kill():
+                log.warning(
+                    "Chrome не отвечает на CDP — CHROME_ALLOW_KILL=1, перезапускаю профиль"
+                )
+                _quit_chrome()
+                time.sleep(1.5)
+            else:
+                log.info(
+                    "Chrome уже запущен — жду remote debugging на порту %s (процесс не трогаю)",
+                    cdp_port,
+                )
+                if _wait_for_cdp(cdp_port, 60.0):
+                    log.info("Chrome remote debugging готов (порт %s)", cdp_port)
+                    return
+                log.warning(
+                    "Порт %s не ответил. Запустите Chrome через start-my-chrome.ps1 "
+                    "или chrome://inspect → Allow remote debugging. Бот не будет гасить Chrome.",
+                    cdp_port,
+                )
+                return
+        user_data = _preferred_chrome_user_data()
+
     args = [
         str(exe),
-        f"--remote-debugging-port={DEFAULT_CDP_PORT}",
+        f"--remote-debugging-port={cdp_port}",
         "--remote-allow-origins=*",
-        "--no-first-run",
-        "--no-default-browser-check",
         f"--user-data-dir={user_data}",
-        "https://bid.cars/en",
     ]
-    log.info(
-        "Запускаю Chrome (профиль бота) с remote debugging на порту %s",
-        DEFAULT_CDP_PORT,
-    )
-    _popen(args)
-    for _ in range(60):
-        if _port_open(DEFAULT_CDP_PORT):
-            log.info("Chrome remote debugging готов (порт %s)", DEFAULT_CDP_PORT)
+    if server_mode:
+        args.extend(
+            [
+                "--headless=new",
+                "--disable-gpu",
+                "--window-size=1920,1080",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ]
+        )
+    elif os.name == "nt":
+        args.extend(_windows_chrome_stability_args())
+    else:
+        args.extend(["--no-first-run", "--no-default-browser-check"])
+
+    proxy = _chrome_proxy_server()
+    if proxy:
+        args.append(f"--proxy-server={proxy}")
+        log.info("Chrome proxy: %s", proxy)
+
+    if server_mode:
+        log.info(
+            "Запускаю headless Chrome (профиль %s), порт %s — переживает disconnect",
+            user_data,
+            cdp_port,
+        )
+        _popen(args)
+    else:
+        log.info(
+            "Запускаю ваш Chrome (профиль %s, disable-gpu) на порту %s",
+            user_data,
+            cdp_port,
+        )
+        _popen_chrome(args)
+
+    for _ in range(90):
+        if _cdp_responsive(cdp_port, timeout=1.5):
+            log.info("Chrome remote debugging готов (порт %s)", cdp_port)
             return
-        time.sleep(0.25)
+        time.sleep(0.3)
     log.warning(
-        "Порт %s ещё не открылся. Откройте %s и нажмите Allow.",
-        DEFAULT_CDP_PORT,
-        INSPECT_URL,
+        "Порт %s не ответил вовремя. Проверьте VPN и профиль Chrome.",
+        cdp_port,
     )
 
 
@@ -778,18 +1105,78 @@ def _chrome_exe() -> Path | None:
 
 
 def _user_data_dirs() -> list[Path]:
+    """Обычные профили Chrome/Edge (с VPN), плюс запасной профиль бота."""
     local = Path(os.environ.get("LOCALAPPDATA", ""))
     home = Path.home()
-    return [
+    dirs: list[Path] = [
         local / "Google/Chrome/User Data",
         local / "Google/Chrome Beta/User Data",
         local / "Microsoft/Edge/User Data",
         home / "Library/Application Support/Google/Chrome",
         home / "Library/Application Support/Google/Chrome Beta",
         home / "Library/Application Support/Microsoft Edge",
-        Path(__file__).resolve().parent / "data" / "chrome-profile",
-        Path(__file__).resolve().parent / "data" / "chrome-profile-export",
     ]
+    # Служба NSSM под SYSTEM не видит LOCALAPPDATA пользователя — ищем по C:\Users
+    if os.name == "nt":
+        users_root = Path(os.environ.get("SystemDrive", "C:") + r"\Users")
+        if users_root.is_dir():
+            skip = {"public", "default", "default user", "all users", "desktop.ini"}
+            for user_home in users_root.iterdir():
+                if not user_home.is_dir() or user_home.name.lower() in skip:
+                    continue
+                dirs.append(user_home / "AppData/Local/Google/Chrome/User Data")
+                dirs.append(user_home / "AppData/Local/Google/Chrome Beta/User Data")
+                dirs.append(user_home / "AppData/Local/Microsoft/Edge/User Data")
+    dirs.append(Path(__file__).resolve().parent / "data" / "chrome-profile")
+    dirs.append(Path(__file__).resolve().parent / "data" / "chrome-profile-export")
+    dirs.append(_bot_chrome_user_data())
+    # Уникальные пути с сохранением порядка
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in dirs:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _preferred_chrome_user_data() -> Path:
+    """
+    Профиль с VPN/логинами пользователя.
+    CHROME_USER_DATA_DIR=... — явный путь; иначе свежий Google Chrome User Data; иначе профиль бота.
+    """
+    env = (os.getenv("CHROME_USER_DATA_DIR") or "").strip().strip('"')
+    if env:
+        path = Path(env)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    if (os.getenv("CHROME_USE_BOT_PROFILE") or "").strip().lower() in {"1", "true", "yes"}:
+        return _bot_chrome_user_data()
+
+    candidates: list[Path] = []
+    for path in _user_data_dirs():
+        if not path.is_dir():
+            continue
+        if "chrome-cdp-profile" in path.parts:
+            continue
+        if (path / "Default").is_dir() or (path / "Local State").is_file():
+            candidates.append(path)
+    if not candidates:
+        return _bot_chrome_user_data()
+
+    def _mtime(path: Path) -> float:
+        probe = path / "Default"
+        try:
+            return (probe if probe.exists() else path).stat().st_mtime
+        except OSError:
+            return 0.0
+
+    # Свежий профиль пользователя (там VPN), не пустой bot-профиль
+    preferred = max(candidates, key=_mtime)
+    log.info("Chrome User Data для CDP/VPN: %s", preferred)
+    return preferred
 
 
 def _image_running(name: str) -> bool:
@@ -846,6 +1233,8 @@ def _read_devtools_active_port(user_data: Path) -> tuple[int, str] | None:
 
 def _cdp_endpoints() -> list[str]:
     found: list[str] = []
+    want_port = _cdp_port()
+    server_mode = _chrome_headless_cdp()
 
     def add(url: str) -> None:
         item = url.strip()
@@ -871,11 +1260,15 @@ def _cdp_endpoints() -> list[str]:
                 add(env)
         except Exception:
             add(env)
-    for data_dir in _user_data_dirs() + [_bot_chrome_user_data()]:
+
+    data_dirs = [_bot_chrome_user_data()] if server_mode else (_user_data_dirs() + [_bot_chrome_user_data()])
+    for data_dir in data_dirs:
         parsed = _read_devtools_active_port(data_dir)
         if not parsed:
             continue
         port, ws_path = parsed
+        if server_mode and port != want_port:
+            continue
         # Старый DevToolsActivePort без живого порта — не долбим ECONNREFUSED
         if not _port_open(port):
             continue
@@ -884,24 +1277,45 @@ def _cdp_endpoints() -> list[str]:
             path = ws_path if ws_path.startswith("/") else f"/{ws_path}"
             add(f"ws://127.0.0.1:{port}{path}")
         add(f"http://127.0.0.1:{port}")
-    if _port_open(DEFAULT_CDP_PORT):
-        # Сначала ws из DevToolsActivePort профиля бота / пользователя
-        for data_dir in _user_data_dirs() + [_bot_chrome_user_data()]:
+    if _port_open(want_port):
+        for data_dir in data_dirs:
             parsed = _read_devtools_active_port(data_dir)
             if not parsed:
                 continue
             port, ws_path = parsed
-            if port != DEFAULT_CDP_PORT or not ws_path:
+            if port != want_port or not ws_path:
                 continue
             path = ws_path if ws_path.startswith("/") else f"/{ws_path}"
             add(f"ws://127.0.0.1:{port}{path}")
-        # Playwright умеет http://127.0.0.1:9222 даже когда /json/version → 404
-        add(f"http://127.0.0.1:{DEFAULT_CDP_PORT}")
+        add(f"http://127.0.0.1:{want_port}")
     return found
 
 
 def _ensure_user_chrome() -> None:
-    if _port_open(DEFAULT_CDP_PORT):
+    # Живой CDP (не просто открытый порт после disconnect)
+    if _cdp_responsive():
+        return
+    if _chrome_headless_cdp():
+        if _port_open(_cdp_port()):
+            _kill_listeners_on_port(_cdp_port())
+            time.sleep(1.0)
+        _launch_chrome_cdp()
+        return
+    if _chrome_running() or _port_open(_cdp_port()):
+        if _chrome_allow_kill():
+            log.warning("Chrome завис или без CDP — CHROME_ALLOW_KILL=1, убиваю и поднимаю")
+            _quit_chrome()
+            time.sleep(1.5)
+            _launch_chrome_cdp()
+            return
+        log.info(
+            "Chrome уже открыт — переподключаюсь / жду CDP, процесс не гашу"
+        )
+        if _wait_for_cdp(_cdp_port(), 45.0):
+            return
+        # Процесс мог сам упасть за время ожидания — тогда можно стартовать
+        if not _chrome_running():
+            _launch_chrome_cdp()
         return
     _launch_chrome_cdp()
 
@@ -1182,7 +1596,17 @@ class CopartScraper:
             except PlaywrightTimeout:
                 pass
 
+    def _yield_to_calc(self) -> None:
+        """Во время мониторинга сразу отдаём Chrome калькулятору."""
+        if not _service or _service.lot_waiters <= 0:
+            return
+        try:
+            _service.run_pending_lot_jobs()
+        except Exception as exc:
+            log.warning("Прерывание ради калькулятора: %s", exc)
+
     def _human_pause(self, page: Any, low: float, high: float) -> None:
+        self._yield_to_calc()
         if _service and _service.lot_waiters > 0:
             low, high = min(low, 0.08), min(high, 0.25)
         ms = _pause_ms(low, high)
@@ -1227,11 +1651,14 @@ class CopartScraper:
         json_lots: list[dict],
         lots_by_id: dict[str, dict],
     ) -> None:
+        self._yield_to_calc()
         self._safe_goto(page, url)
+        self._yield_to_calc()
         self._human_pause(page, 2.2, 5.5)
         self._accept_cookies(page)
         self._human_mouse(page)
         self._wait_out_protection(page)
+        self._yield_to_calc()
         self._human_scroll(page)
         if not self._wait_for_results(page):
             log.info("«%s»: пустой результат", search_name)
@@ -1239,6 +1666,7 @@ class CopartScraper:
 
         before = len(lots_by_id)
         for page_no in range(1, self.page_limit + 1):
+            self._yield_to_calc()
             self._tag(json_lots, search_name)
             html_lots = self._lots_from_html(page)
             self._tag(html_lots, search_name)
@@ -1465,27 +1893,33 @@ class CopartScraper:
                 continue
 
     def _wait_for_results(self, page: Any) -> bool:
-        try:
-            page.wait_for_selector('a[href*="/lot/"]', timeout=25_000)
-            return True
-        except PlaywrightTimeout:
-            self._raise_if_blocked(page)
-            body = ""
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            self._yield_to_calc()
             try:
-                body = (page.inner_text("body") or "").lower()
-            except Exception:
-                pass
-            empty_hints = (
-                "0 search",
-                "no result",
-                "no lots",
-                "showing 0",
-                "0 entries",
-            )
-            if any(hint in body for hint in empty_hints):
-                return False
-            log.info("На странице нет ссылок на лоты — считаю поиск пустым")
-            return False
+                page.wait_for_selector('a[href*="/lot/"]', timeout=3_000)
+                return True
+            except PlaywrightTimeout:
+                if self._is_blocked(page):
+                    self._wait_out_protection(page)
+                    continue
+                body = ""
+                try:
+                    body = (page.inner_text("body") or "").lower()
+                except Exception:
+                    pass
+                empty_hints = (
+                    "0 search",
+                    "no result",
+                    "no lots",
+                    "showing 0",
+                    "0 entries",
+                )
+                if any(hint in body for hint in empty_hints):
+                    return False
+        self._raise_if_blocked(page)
+        log.info("На странице нет ссылок на лоты — считаю поиск пустым")
+        return False
 
     def _is_blocked(self, page: Any) -> bool:
         html = ""
@@ -1503,27 +1937,33 @@ class CopartScraper:
                 "Copart показал защиту. Поставьте HEADLESS=false в .env — окно Chrome откроется один раз."
             )
         log.info("Пройдите проверку в Chrome один раз. Окно не закрывайте. Жду до 3 минут.")
-        try:
-            if allow_home:
-                page.wait_for_function(
-                    """() => {
-                        const html = document.documentElement.innerHTML.toLowerCase();
-                        return !html.includes('incapsula') && !html.includes('pardon our interruption');
-                    }""",
-                    timeout=180_000,
-                )
-            elif lot:
-                page.wait_for_function(
-                    """() => {
-                        const html = document.documentElement.innerHTML.toLowerCase();
-                        if (html.includes('incapsula') || html.includes('pardon our interruption')) return false;
-                        return Boolean(document.querySelector('h1') || document.querySelector('#locationInfoButton'));
-                    }""",
-                    timeout=180_000,
-                )
-            else:
-                page.wait_for_selector('a[href*="/lot/"]', timeout=180_000)
-        except PlaywrightTimeout:
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            self._yield_to_calc()
+            try:
+                if allow_home:
+                    page.wait_for_function(
+                        """() => {
+                            const html = document.documentElement.innerHTML.toLowerCase();
+                            return !html.includes('incapsula') && !html.includes('pardon our interruption');
+                        }""",
+                        timeout=4_000,
+                    )
+                elif lot:
+                    page.wait_for_function(
+                        """() => {
+                            const html = document.documentElement.innerHTML.toLowerCase();
+                            if (html.includes('incapsula') || html.includes('pardon our interruption')) return false;
+                            return Boolean(document.querySelector('h1') || document.querySelector('#locationInfoButton'));
+                        }""",
+                        timeout=4_000,
+                    )
+                else:
+                    page.wait_for_selector('a[href*="/lot/"]', timeout=4_000)
+                break
+            except PlaywrightTimeout:
+                continue
+        else:
             raise CopartBlockedError("Проверка не пройдена за 3 минуты.") from None
         if not fast:
             self._human_pause(page, 1.5, 3.0)
@@ -1758,6 +2198,7 @@ class ScrapeService:
         self._json_hook_pages: set[int] = set()
         self._monitor_warmed = False
         self._thread_id: int | None = None
+        self._in_lot_interrupt = False
 
     def _next_job_seq(self) -> int:
         with self._job_seq_lock:
@@ -1777,7 +2218,7 @@ class ScrapeService:
         with self._lot_waiters_lock:
             self.lot_waiters += 1
         try:
-            return self._run_job({"kind": "lot", "url": url}, timeout=120)
+            return self._run_job({"kind": "lot", "url": url}, timeout=180)
         finally:
             with self._lot_waiters_lock:
                 self.lot_waiters = max(0, self.lot_waiters - 1)
@@ -1906,9 +2347,10 @@ class ScrapeService:
             "google_miles": 2,
         }
         priority = priority_by_kind.get(payload.get("kind"), 10)
-        job = {**payload, "done": done, "result": None, "error": None}
+        job = {**payload, "done": done, "result": None, "error": None, "cancelled": False}
         self._queue.put((priority, self._next_job_seq(), job))
         if not done.wait(timeout=timeout):
+            job["cancelled"] = True
             kind = payload.get("kind")
             if kind in {"bidcars_lot", "bidcars_search", "copart_us_lot", "iaai_lot", "usa_sublot", "ny_dmv_lien"}:
                 raise CopartBlockedError(
@@ -1930,66 +2372,115 @@ class ScrapeService:
             while True:
                 try:
                     self._open_browser()
+                    self._ensure_dedicated_tabs(park=True)
                     break
                 except Exception as exc:
                     log.warning("Не удалось подключиться к Chrome (%s). Повтор через 8 с.", exc)
                     time.sleep(8)
             while True:
-                _, _, job = self._queue.get()
+                try:
+                    _, _, job = self._queue.get(timeout=20)
+                except queue.Empty:
+                    try:
+                        self._keepalive_lot_tab()
+                    except Exception as exc:
+                        log.warning("Keepalive вкладки лотов: %s", exc)
+                    continue
                 if job is None:
                     break
+                if job.get("cancelled"):
+                    job["done"].set()
+                    continue
                 try:
                     job["result"] = self._run_browser_job(job)
                 except Exception as exc:
-                    if _is_target_closed(exc):
-                        log.warning("Связь с Chrome пропала — подключаюсь снова")
+                    if not job.get("cancelled"):
+                        if _is_target_closed(exc):
+                            log.warning("Связь с Chrome пропала — переподключаюсь к текущему окну")
+                            try:
+                                self._reconnect_to_chrome()
+                                if not job.get("cancelled"):
+                                    job["result"] = self._run_browser_job(job)
+                            except Exception as retry_exc:
+                                if not job.get("cancelled"):
+                                    job["error"] = retry_exc
+                        else:
+                            job["error"] = exc
+                else:
+                    if not job.get("cancelled"):
                         try:
-                            self._restart_browser()
-                            job["result"] = self._run_browser_job(job)
-                        except Exception as retry_exc:
-                            job["error"] = retry_exc
-                    else:
-                        job["error"] = exc
+                            self._recycle_after_calc(job.get("kind"))
+                        except Exception as recycle_exc:
+                            log.warning("Обновление вкладок после расчёта: %s", recycle_exc)
                 job["done"].set()
         finally:
             self._close_browser()
 
     def run_pending_lot_jobs(self) -> None:
         """Прерывает мониторинг ради калькулятора (Copart lot / Bid.cars)."""
-        while True:
-            try:
-                priority, seq, job = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            kind = (job or {}).get("kind")
-            if not job or kind not in {"lot", "bidcars_lot", "copart_us_lot", "iaai_lot", "usa_sublot", "ny_dmv_lien"}:
-                self._queue.put((priority, seq, job))
-                break
-            label = {
-                "bidcars_lot": "Bid.cars",
-                "copart_us_lot": "Copart USA",
-                "iaai_lot": "IAAI",
-                "usa_sublot": "Sublot/Offsite",
-                "ny_dmv_lien": "NY DMV залог",
-            }.get(kind, "лот Copart")
-            log.info("Пауза мониторинга — срочно открываю %s", label)
-            try:
-                job["result"] = self._run_browser_job(job)
-            except Exception as exc:
-                if _is_target_closed(exc):
-                    log.warning("Связь с Chrome пропала — подключаюсь снова")
-                    try:
-                        self._restart_browser()
-                        job["result"] = self._run_browser_job(job)
-                    except Exception as retry_exc:
-                        job["error"] = retry_exc
-                else:
-                    job["error"] = exc
-            job["done"].set()
+        if self._in_lot_interrupt:
+            return
+        self._in_lot_interrupt = True
+        try:
+            while True:
+                try:
+                    priority, seq, job = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if job and job.get("cancelled"):
+                    job["done"].set()
+                    continue
+                kind = (job or {}).get("kind")
+                if not job or kind not in {"lot", "bidcars_lot", "copart_us_lot", "iaai_lot", "usa_sublot", "ny_dmv_lien"}:
+                    self._queue.put((priority, seq, job))
+                    break
+                label = {
+                    "bidcars_lot": "Bid.cars",
+                    "copart_us_lot": "Copart USA",
+                    "iaai_lot": "IAAI",
+                    "usa_sublot": "Sublot/Offsite",
+                    "ny_dmv_lien": "NY DMV залог",
+                }.get(kind, "лот Copart")
+                log.info("Пауза мониторинга — срочно открываю %s", label)
+                try:
+                    job["result"] = self._run_browser_job(job)
+                except Exception as exc:
+                    if job.get("cancelled"):
+                        pass
+                    elif _is_target_closed(exc):
+                        log.warning("Связь с Chrome пропала — переподключаюсь к текущему окну")
+                        try:
+                            self._reconnect_to_chrome()
+                            job["result"] = self._run_browser_job(job)
+                        except Exception as retry_exc:
+                            job["error"] = retry_exc
+                    else:
+                        job["error"] = exc
+                finally:
+                    if not job.get("cancelled"):
+                        try:
+                            self._recycle_after_calc(kind)
+                        except Exception as recycle_exc:
+                            log.warning("Обновление вкладок после расчёта: %s", recycle_exc)
+                job["done"].set()
+        finally:
+            self._in_lot_interrupt = False
 
     def _run_browser_job(self, job: dict):
-        self._ensure_browser()
         kind = job.get("kind") or "search"
+        if _is_calc_lot_kind(kind):
+            # Mac/Windows: перед лотом убеждаемся, что Playwright видит окна (не только CDP).
+            if os.name == "nt":
+                self._ensure_chrome_responsive_or_revive()
+            else:
+                try:
+                    self._ensure_context()
+                except Exception:
+                    log.warning("Контекст Chrome потерян — полный reconnect")
+                    self._restart_browser()
+                    self._ensure_dedicated_tabs(park=True)
+        else:
+            self._ensure_browser()
         helper = CopartScraper(job.get("searches") or [], max_pages=job.get("page_limit") or 0, headless=self.headless)
         if kind == "lot":
             lot_id = parse_lot_id(job["url"])
@@ -1998,7 +2489,7 @@ class ScrapeService:
             page = self._ensure_copart_tab(
                 f"https://www.copart.co.uk/lot/{lot_id}",
                 role="lot",
-                focus=False,
+                focus=_lot_tab_focus(),
             )
             return helper.fetch_lot_details(page, job["url"], self._json_target, fast=True)
         if kind == "image":
@@ -2044,7 +2535,7 @@ class ScrapeService:
             from usa_auction import extract_copart_us_lot, normalize_copart_us_url, parse_copart_us_lot_id
 
             canonical = normalize_copart_us_url(job["url"])
-            page = self._ensure_copart_us_tab(canonical, focus=True)
+            page = self._ensure_copart_us_tab(canonical, focus=_lot_tab_focus())
             details = extract_copart_us_lot(page, canonical)
             lot_id = str(details.get("lot_id") or parse_copart_us_lot_id(canonical) or "0")
             log.info(
@@ -2059,7 +2550,7 @@ class ScrapeService:
             from usa_auction import extract_iaai_lot, normalize_iaai_url, parse_iaai_stock_id
 
             canonical = normalize_iaai_url(job["url"])
-            page = self._ensure_iaai_tab(canonical, focus=True)
+            page = self._ensure_iaai_tab(canonical, focus=_lot_tab_focus())
             details = extract_iaai_lot(page, canonical)
             lot_id = str(details.get("lot_id") or parse_iaai_stock_id(canonical) or "0")
             log.info(
@@ -2136,14 +2627,209 @@ class ScrapeService:
         lots, self._monitor_warmed = helper.collect(page, self._json_target, self._monitor_warmed)
         return lots
 
+    def _ensure_chrome_responsive_or_revive(self) -> None:
+        """После сбоя CDP: сначала reconnect к живому Chrome, процесс не гасим."""
+        if _cdp_responsive(timeout=3.0) and self._browser_alive():
+            # Быстрый пинг вкладки лотов
+            if self._tab_alive(self._lot_page):
+                try:
+                    self._lot_page.evaluate("() => 1")
+                    return
+                except Exception:
+                    log.warning("Вкладка лотов не отвечает — переподключаюсь к Chrome")
+            else:
+                try:
+                    self._ensure_dedicated_tabs(park=True)
+                    return
+                except Exception:
+                    pass
+        if _cdp_responsive(timeout=3.0):
+            log.info("CDP жив — переподключаюсь к вашему Chrome")
+            try:
+                self._reconnect_to_chrome()
+                return
+            except Exception as exc:
+                log.warning("Reconnect не удался (%s)", exc)
+                if not _chrome_allow_kill():
+                    raise
+        else:
+            log.warning(
+                "CDP не отвечает — %s",
+                "жду/переподключаюсь без kill"
+                if not _chrome_allow_kill()
+                else "полный рестарт Chrome",
+            )
+        if _chrome_allow_kill():
+            self._restart_chrome_fresh()
+        else:
+            self._reconnect_to_chrome()
+
+    def _recycle_lot_tabs_only(self) -> None:
+        """Закрыть вкладки лотов и открыть свежие — процесс Chrome и VPN не трогаем."""
+        for attr in (
+            "_lot_page",
+            "_copart_us_page",
+            "_iaai_page",
+            "_bidcars_page",
+            "_ny_dmv_page",
+            "_maps_page",
+        ):
+            page = getattr(self, attr, None)
+            if not page:
+                continue
+            try:
+                if not page.is_closed():
+                    page.close()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+        self._ensure_dedicated_tabs(park=True)
+
+    def _reconnect_to_chrome(self) -> None:
+        """Сбросить Playwright-сессию и подключиться к уже открытому Chrome."""
+        log.info("Переподключаюсь к текущему Chrome…")
+        self._close_browser()
+        _ensure_user_chrome()
+        deadline = time.time() + 45
+        while time.time() < deadline and not _cdp_responsive(timeout=1.5):
+            time.sleep(0.3)
+        self._open_browser()
+        self._ensure_dedicated_tabs(park=True)
+        log.info("Снова на связи с текущим Chrome")
+
+    def _restart_chrome_fresh(self) -> None:
+        """Полный подъём Chrome заново (только при CHROME_ALLOW_KILL=1)."""
+        if not _chrome_allow_kill() and not _chrome_headless_cdp():
+            self._reconnect_to_chrome()
+            return
+        log.info("Поднимаю Chrome заново…")
+        self._close_browser()
+        if _chrome_headless_cdp():
+            _kill_listeners_on_port(_cdp_port())
+            time.sleep(1.0)
+        else:
+            _quit_chrome()
+            time.sleep(1.2)
+            try:
+                for data_dir in (_preferred_chrome_user_data(), _bot_chrome_user_data()):
+                    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                        path = data_dir / name
+                        try:
+                            if path.exists():
+                                path.unlink()
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+        _ensure_user_chrome()
+        # ждём порт
+        deadline = time.time() + 45
+        while time.time() < deadline and not _port_open(_cdp_port()):
+            time.sleep(0.3)
+        self._open_browser()
+        self._ensure_dedicated_tabs(park=True)
+        log.info("Chrome снова готов к расчёту")
+
+    def _recycle_after_calc(self, kind: str | None) -> None:
+        if not _is_calc_lot_kind(kind):
+            return
+        mode = _calc_recycle_mode()
+        if mode == "off":
+            return
+        if mode == "tab":
+            log.info("После расчёта обновляю вкладку лотов")
+            self._recycle_lot_tabs_only()
+            return
+        # chrome / full — без CHROME_ALLOW_KILL только reconnect
+        if _chrome_allow_kill() or _chrome_headless_cdp():
+            self._restart_chrome_fresh()
+        else:
+            log.info("После расчёта переподключаюсь к Chrome (без kill)")
+            self._reconnect_to_chrome()
+
     def _tab_alive(self, page: Any) -> bool:
         if not page:
             return False
         try:
             _ = page.url
+            # Страница могла «умереть» после crash/закрытия вкладки
+            if page.is_closed():
+                return False
             return True
         except Exception:
             return False
+
+    def _mark_lot_tab(self, page: Any) -> None:
+        try:
+            page.evaluate("() => { try { document.title = 'MG · лоты (не закрывать)'; } catch (e) {} }")
+        except Exception:
+            pass
+
+    def _ensure_context(self) -> Any:
+        """Контекст CDP: при пустом списке окон — reconnect (Chrome часто ещё жив)."""
+        for attempt in range(2):
+            self._ensure_browser()
+            try:
+                contexts = list(self._browser.contexts) if self._browser else []
+            except Exception:
+                contexts = []
+            if contexts:
+                self._context = contexts[0]
+                return self._context
+            if attempt == 0:
+                log.warning("Playwright не видит окна Chrome — переподключаюсь по CDP")
+                self._restart_browser()
+        raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
+
+    def _ensure_dedicated_tabs(self, *, park: bool = False) -> None:
+        """Отдельные вкладки мониторинг + лоты — живут постоянно, остальные вкладки не трогаем."""
+        self._ensure_context()
+
+        if not self._tab_alive(self._lot_page):
+            page = self._context.new_page()
+            self._lot_page = page
+            self._attach_json_capture(page)
+            log.info("Создал постоянную вкладку Copart: подтягивание лотов")
+            if park:
+                try:
+                    CopartScraper([], headless=self.headless)._safe_goto(page, HOME_URL)
+                    self._mark_lot_tab(page)
+                    log.info("Вкладка лотов прогрета на %s (VPN/сессия)", HOME_URL)
+                except Exception as exc:
+                    log.warning("Не удалось прогреть вкладку лотов: %s", exc)
+
+        if not self._tab_alive(self._monitor_page):
+            page = self._context.new_page()
+            self._monitor_page = page
+            self._attach_json_capture(page)
+            log.info("Создал постоянную вкладку Copart: мониторинг авто")
+            if park:
+                try:
+                    CopartScraper([], headless=self.headless)._safe_goto(page, HOME_URL)
+                    page.evaluate(
+                        "() => { try { document.title = 'MG · мониторинг'; } catch (e) {} }"
+                    )
+                except Exception as exc:
+                    log.warning("Не удалось прогреть вкладку мониторинга: %s", exc)
+
+    def _keepalive_lot_tab(self) -> None:
+        """Пока очередь пуста — держим вкладку лотов живой (без убийства Chrome)."""
+        if not self._browser_alive():
+            log.info("Keepalive: Chrome отвалился — подключаюсь снова")
+            self._restart_browser()
+            self._ensure_dedicated_tabs(park=True)
+            return
+        if not self._tab_alive(self._lot_page):
+            log.info("Keepalive: вкладка лотов закрыта — открываю снова")
+            self._ensure_dedicated_tabs(park=True)
+            return
+        try:
+            self._lot_page.evaluate("() => 1")
+            self._mark_lot_tab(self._lot_page)
+        except Exception:
+            log.info("Keepalive: вкладка лотов зависла — пересоздаю")
+            self._lot_page = None
+            self._ensure_dedicated_tabs(park=True)
 
     def _attach_json_capture(self, page: Any) -> None:
         page_id = id(page)
@@ -2160,34 +2846,34 @@ class ScrapeService:
         if role not in {"monitor", "lot"}:
             raise ValueError(f"Unknown tab role: {role}")
         if focus is None:
-            focus = role == "monitor"
-        self._ensure_browser()
+            focus = _lot_tab_focus()
+        self._ensure_dedicated_tabs(park=False)
         attr = "_monitor_page" if role == "monitor" else "_lot_page"
         page = getattr(self, attr)
         if not self._tab_alive(page):
-            contexts = list(self._browser.contexts) if self._browser else []
-            if not contexts:
-                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
-            self._context = contexts[0]
-            page = self._context.new_page()
-            setattr(self, attr, page)
-            label = "мониторинг авто" if role == "monitor" else "подтягивание лотов"
-            log.info("Создал вкладку Copart: %s", label)
-            self._attach_json_capture(page)
+            # _ensure_dedicated_tabs уже должен был создать; на всякий случай ещё раз
+            self._ensure_dedicated_tabs(park=role == "lot")
+            page = getattr(self, attr)
+        if not self._tab_alive(page):
+            raise RuntimeError("Не удалось открыть вкладку Copart для лотов")
         if focus:
-            try:
-                page.bring_to_front()
-            except Exception:
-                pass
+            _focus_page(page)
         target = url.strip()
         current = (page.url or "").strip()
         target_lot = parse_lot_id(target)
         current_lot = parse_lot_id(current)
         if role == "lot" and target_lot and target_lot == current_lot:
+            if focus:
+                _focus_page(page)
+            self._mark_lot_tab(page)
             return page
         if current.rstrip("/").lower() != target.rstrip("/").lower():
             log.info("Открываю в Chrome (%s): %s", role, target)
             CopartScraper([], headless=self.headless)._safe_goto(page, target)
+            if role == "lot":
+                self._mark_lot_tab(page)
+            if focus:
+                _focus_page(page)
         return page
 
     def _check_usa_sublot_job(
@@ -2302,13 +2988,9 @@ class ScrapeService:
         return details
 
     def _ensure_bidcars_tab(self, url: str) -> Any:
-        self._ensure_browser()
         page = self._bidcars_page
         if not self._tab_alive(page):
-            contexts = list(self._browser.contexts) if self._browser else []
-            if not contexts:
-                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
-            self._context = contexts[0]
+            self._ensure_context()
             page = self._context.new_page()
             self._bidcars_page = page
             log.info("Создал вкладку Bid.cars")
@@ -2319,23 +3001,18 @@ class ScrapeService:
         # Сам переход делает extract_bidcars_lot: полный document load, не SPA.
         return page
 
-    def _ensure_copart_us_tab(self, url: str, *, focus: bool = True) -> Any:
+    def _ensure_copart_us_tab(self, url: str, *, focus: bool | None = None) -> Any:
         """Отдельная вкладка Copart.com — как lot-вкладка в калькуляторе."""
-        self._ensure_browser()
+        if focus is None:
+            focus = _lot_tab_focus()
         page = self._copart_us_page
         if not self._tab_alive(page):
-            contexts = list(self._browser.contexts) if self._browser else []
-            if not contexts:
-                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
-            self._context = contexts[0]
+            self._ensure_context()
             page = self._context.new_page()
             self._copart_us_page = page
             log.info("Создал вкладку Copart USA")
         if focus:
-            try:
-                page.bring_to_front()
-            except Exception:
-                pass
+            _focus_page(page)
         target = (url or "").strip()
         if not target:
             return page
@@ -2345,21 +3022,23 @@ class ScrapeService:
         target_lot = parse_copart_us_lot_id(target)
         current_lot = parse_copart_us_lot_id(current)
         if target_lot and target_lot == current_lot and "/lot/" in current.lower():
+            if focus:
+                _focus_page(page)
             return page
         if current.rstrip("/").lower() != target.rstrip("/").lower():
             log.info("Открываю в Chrome (copart_us): %s", target)
             CopartScraper([], headless=self.headless)._safe_goto(page, target)
+            if focus:
+                _focus_page(page)
         return page
 
-    def _ensure_iaai_tab(self, url: str, *, focus: bool = True) -> Any:
+    def _ensure_iaai_tab(self, url: str, *, focus: bool | None = None) -> Any:
         """Отдельная вкладка IAAI.com — как lot-вкладка в калькуляторе."""
-        self._ensure_browser()
+        if focus is None:
+            focus = _lot_tab_focus()
         page = self._iaai_page
         if not self._tab_alive(page):
-            contexts = list(self._browser.contexts) if self._browser else []
-            if not contexts:
-                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
-            self._context = contexts[0]
+            self._ensure_context()
             page = self._context.new_page()
             self._iaai_page = page
             log.info("Создал вкладку IAAI")
@@ -2384,13 +3063,9 @@ class ScrapeService:
         return page
 
     def _ensure_maps_tab(self) -> Any:
-        self._ensure_browser()
         page = self._maps_page
         if not self._tab_alive(page):
-            contexts = list(self._browser.contexts) if self._browser else []
-            if not contexts:
-                raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
-            self._context = contexts[0]
+            self._ensure_context()
             page = self._context.new_page()
             self._maps_page = page
             log.info("Создал вкладку Google Maps")
@@ -2403,8 +3078,8 @@ class ScrapeService:
         if not self._browser:
             return False
         try:
-            _ = list(self._browser.contexts)
-            return True
+            # Пустой contexts при живом CDP — типичный desync Playwright; считаем мёртвым.
+            return bool(list(self._browser.contexts))
         except Exception:
             return False
 
@@ -2420,11 +3095,9 @@ class ScrapeService:
         if not contexts:
             raise RuntimeError("В Chrome нет окон — оставьте браузер открытым")
         self._context = contexts[0]
-        log.info("Подключился к Chrome — открою 2 вкладки: мониторинг и лоты")
+        log.info("Подключился к Chrome — держу отдельные вкладки: мониторинг и лоты")
 
     def _ensure_browser(self) -> None:
-        if self._browser_alive() and self._copart_pages_alive():
-            return
         if self._browser_alive():
             return
         log.info("Chrome не отвечает — подключаюсь к вашему окну снова")
@@ -2448,7 +3121,8 @@ class ScrapeService:
                 )
                 self._pick_page()
                 self._monitor_warmed = False
-                log.info("Две вкладки Copart: мониторинг и лоты — другие вкладки не трогаю.")
+                self._ensure_dedicated_tabs(park=True)
+                log.info("Вкладки Copart готовы (мониторинг + лоты) — другие вкладки не трогаю.")
                 return
             except Exception as exc:
                 last_error = exc
@@ -2468,8 +3142,9 @@ class ScrapeService:
         prompted = False
         last_error = None
         deadline = time.time() + 240
+        cdp_port = _cdp_port()
         while time.time() < deadline:
-            if not _port_open(DEFAULT_CDP_PORT):
+            if not _cdp_responsive(cdp_port, timeout=2.0):
                 try:
                     _ensure_user_chrome()
                 except Exception as exc:
@@ -2484,15 +3159,27 @@ class ScrapeService:
                 except Exception as exc:
                     last_error = exc
                     self._close_browser()
-                    log.warning("Chrome не пустил к окну (%s). Если всплыло Allow — нажмите.", exc)
-                    time.sleep(5)
+                    if _chrome_allow_kill() or _chrome_headless_cdp():
+                        log.warning("Chrome не пустил к окну (%s). Поднимаю снова.", exc)
+                        if _chrome_headless_cdp():
+                            _kill_listeners_on_port(cdp_port)
+                        else:
+                            _quit_chrome()
+                        time.sleep(2)
+                    else:
+                        log.warning(
+                            "Chrome не пустил к окну (%s). Жду и пробую снова без kill.",
+                            exc,
+                        )
+                        time.sleep(2)
                     continue
             if not prompted:
-                _open_inspect_page()
+                if not _chrome_headless_cdp():
+                    _open_inspect_page()
                 log.warning(
                     "Chrome remote debugging выключен (порт %s закрыт). "
                     "Откройте %s → Allow remote debugging, затем повторите.",
-                    DEFAULT_CDP_PORT,
+                    cdp_port,
                     INSPECT_URL,
                 )
                 prompted = True

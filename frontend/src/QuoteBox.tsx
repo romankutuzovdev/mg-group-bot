@@ -53,16 +53,16 @@ export function autoDeliveryColumn(vehicleType: string, categoryB: boolean): str
 
 export const DISMANTLE_LABEL: Record<string, string> = {
   sedan: "Седан",
-  suv: "SUV / джип",
+  suv: "Внедорожник",
   sprinter: "Спринтер / бус",
-  pickup: "Пикап",
+  pickup: "Пикап / X7 / LR",
 };
 
 export const DISMANTLE_TARIFF_USD: Record<string, number> = {
-  sedan: 2200,
-  suv: 2450,
+  sedan: 2250,
+  suv: 2550,
   sprinter: 2350,
-  pickup: 2650,
+  pickup: 2850,
 };
 
 /** Тарифы разбора USA (премиум). */
@@ -85,8 +85,9 @@ export function usaDismantleType(raw: string | null | undefined): string {
   return "sedan";
 }
 
-export const DISMANTLE_WEIGHT_BASE = 800;
-export const DISMANTLE_WEIGHT_PER_KG = 1.6;
+/** Разбор по весу — UK (прайс от 14.09.2026). */
+export const DISMANTLE_WEIGHT_BASE = 850;
+export const DISMANTLE_WEIGHT_PER_KG = 1.4;
 
 /** Разбор по весу — USA (Bid.cars / IAAI). */
 export const USA_DISMANTLE_WEIGHT_BASE = 1300;
@@ -102,9 +103,9 @@ export function usaDismantleWeightTotal(kg: number): number {
 
 export function dismantleWeightHint(kg?: number | null): string {
   if (kg && kg > 0) {
-    return `800 USD + 1.6 × ${kg} кг = ${usd(dismantleWeightTotal(kg))}`;
+    return `850 USD + 1.4 × ${kg} кг = ${usd(dismantleWeightTotal(kg))}`;
   }
-  return "800 USD + 1.6 × кг";
+  return "850 USD + 1.4 × кг";
 }
 
 export function usaDismantleWeightHint(kg?: number | null): string {
@@ -401,10 +402,12 @@ export function IaaiQuoteBox({ quote }: { quote: IaaiQuote }) {
   const isRestoration = quote.purpose === "restoration";
   const isCopartUs = fees.auction === "copart" || fees.fees_source === "copart_us";
   const feesFromBidcars = fees.fees_source === "bidcars" || fees.auction_fees_usd != null;
+  const defaultDispatch = isRestoration ? 250 : 200;
+  const defaultTransferRate = isRestoration ? 0.035 : 0.03;
   const baseUsa = quote.subtotal_usa ?? (usa?.america_subtotal_usd ?? fees.iaai_total);
   const totalUsa =
     quote.usa_with_fees ??
-    baseUsa + (quote.dispatching_usd ?? 250) + (quote.transfer_fee ?? 0);
+    baseUsa + (quote.dispatching_usd ?? defaultDispatch) + (quote.transfer_fee ?? 0);
   const isHigh = fees.volume === "high";
   const sizeLabel = quote.vehicle_size_label || usa?.vehicle_size_label || "";
   return (
@@ -502,14 +505,14 @@ export function IaaiQuoteBox({ quote }: { quote: IaaiQuote }) {
                       : "—"
                 }
               />
-            ) : isRestoration ? (
+            ) : (
               <QuoteRow
                 label="Документы / Title"
                 hint="тип не подтянулся с лота — укажите вручную после обновления"
                 value="—"
               />
-            ) : null}
-            {isRestoration && quote.is_sublot ? (
+            )}
+            {quote.is_sublot ? (
               <QuoteRow
                 label="Sublot / Offsite"
                 hint={quote.sublot_location || "доплата за дополнительную площадку"}
@@ -587,10 +590,10 @@ export function IaaiQuoteBox({ quote }: { quote: IaaiQuote }) {
           value={usd(quote.sublot_usd ?? 100, 0)}
         />
       ) : null}
-      <QuoteRow label="Диспетчинг" value={usd(quote.dispatching_usd ?? 250)} />
+      <QuoteRow label="Диспетчинг" value={usd(quote.dispatching_usd ?? defaultDispatch)} />
       <QuoteRow
-        label={`Комиссия за перевод ${((quote.transfer_fee_rate ?? 0.035) * 100).toLocaleString("ru-RU")}%`}
-        hint={`${usd(baseUsa, 2)} × ${((quote.transfer_fee_rate ?? 0.035) * 100).toLocaleString("ru-RU")}%`}
+        label={`Комиссия за перевод ${((quote.transfer_fee_rate ?? defaultTransferRate) * 100).toLocaleString("ru-RU")}%`}
+        hint={`${usd(baseUsa, 2)} × ${((quote.transfer_fee_rate ?? defaultTransferRate) * 100).toLocaleString("ru-RU")}%`}
         value={usd(quote.transfer_fee ?? 0, 2)}
       />
       <QuoteRow label="Расходы США" value={usd(totalUsa, 2)} total />

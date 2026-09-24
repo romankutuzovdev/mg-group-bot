@@ -1,0 +1,45 @@
+# Деплой на Windows Server при push в main.
+# Secrets (GitHub → Settings → Secrets and variables → Actions):
+#   SSH_HOST         — IP или домен Windows Server
+#   SSH_USER         — например Administrator
+#   SSH_PRIVATE_KEY  — приватный ключ (весь файл BEGIN/END)
+#   SSH_PORT         — опционально, по умолчанию 22
+#   APP_DIR          — опционально, по умолчанию C:\mg-crm
+#
+# Если деплоите только на Windows — отключите workflow "Deploy to server" (Linux).
+name: Deploy to Windows Server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH (Windows)
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          APP_DIR: ${{ secrets.APP_DIR }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          # Явно PowerShell — не зависит от shell по умолчанию в OpenSSH
+          script: |
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "
+              $AppDir = [Environment]::GetEnvironmentVariable('APP_DIR', 'Process');
+              if ([string]::IsNullOrWhiteSpace($AppDir)) { $AppDir = '${{ secrets.APP_DIR }}' };
+              if ([string]::IsNullOrWhiteSpace($AppDir)) { $AppDir = 'C:\mg-crm' };
+              if (-not (Test-Path (Join-Path $AppDir '.git'))) {
+                Write-Host 'На сервере ещё нет git-клона в' $AppDir;
+                Write-Host 'Сделайте один раз: git clone <repo>' $AppDir;
+                Write-Host 'Затем: powershell -ExecutionPolicy Bypass -File' (Join-Path $AppDir 'deploy\install-windows.ps1');
+                exit 1
+              };
+              $env:APP_DIR = $AppDir;
+              & (Join-Path $AppDir 'deploy\update-from-git.ps1')
+            "

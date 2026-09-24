@@ -1,0 +1,19 @@
+[Unit]
+Description=MG Group CRM (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/mg-crm
+Environment=PATH=/opt/mg-crm/.venv/bin:/usr/local/bin:/usr/bin
+ExecStart=/opt/mg-crm/.venv/bin/python /opt/mg-crm/app.py
+Restart=always
+RestartSec=5
+# Playwright / Chrome
+Environment=HOME=/opt/mg-crm
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/mg-crm/.pw-browsers
+
+[Install]
+WantedBy=multi-user.target

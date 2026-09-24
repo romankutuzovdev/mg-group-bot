@@ -723,10 +723,9 @@ def normalize_bidcars_details(raw: dict, url: str) -> dict:
     # Не подменять Местоположение вторым городом со страницы — мили только от него
     if location:
         location = re.sub(r"\s+", " ", location).strip()
-        # обрезать хвосты вроде "Отправка из ..." если regex захватил лишнее
         location = re.split(r"\s+(?:Отправка из|Shipping from|Продавец|Seller)\b", location, maxsplit=1)[0].strip()
 
-    # Мили inland: только «Местоположение», не «Отправка из» и не branch из JSON
+    # Машинокомплект: мили до NJ/Houston, $1 = 1 mi
     route = resolve_us_inland(location, None, allow_chrome_maps=False)
     inland = route.get("inland_usd")
     if inland is None:

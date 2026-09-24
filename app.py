@@ -255,19 +255,25 @@ def _public_api(method: str, path: str) -> bool:
     return False
 
 
-def _set_session_cookie(response: Response, token: str) -> None:
+def _set_session_cookie(response: Response, token: str, *, secure: bool = False) -> None:
     response.set_cookie(
         SESSION_COOKIE,
         token,
         httponly=True,
         samesite="lax",
+        secure=secure,
         max_age=SESSION_MAX_AGE,
         path="/",
     )
 
 
-def _clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE, path="/")
+def _clear_session_cookie(response: Response, *, secure: bool = False) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=secure, samesite="lax")
+
+
+def _cookie_secure(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+    return proto == "https"
 
 
 def _request_user(request: Request) -> dict:
@@ -521,7 +527,7 @@ def auth_login() -> dict:
 
 
 @app.get("/api/auth/login/{token}")
-def auth_poll(token: str, response: Response) -> dict:
+def auth_poll(token: str, request: Request, response: Response) -> dict:
     row = store.get_login_token(token)
     if not row:
         raise HTTPException(404, "Сессия входа не найдена")
@@ -529,7 +535,7 @@ def auth_poll(token: str, response: Response) -> dict:
         user = store.get_user(row["user_id"])
         if not user or not user["enabled"]:
             return {"status": "denied"}
-        _set_session_cookie(response, row["session_token"])
+        _set_session_cookie(response, row["session_token"], secure=_cookie_secure(request))
         return {"status": "ok", "user": user}
     if row["expires_at"] < datetime.now(timezone.utc).isoformat():
         return {"status": "expired"}
@@ -539,7 +545,7 @@ def auth_poll(token: str, response: Response) -> dict:
 @app.post("/api/auth/logout")
 def auth_logout(request: Request, response: Response) -> dict:
     store.delete_session(request.cookies.get(SESSION_COOKIE))
-    _clear_session_cookie(response)
+    _clear_session_cookie(response, secure=_cookie_secure(request))
     return {"ok": True}
 
 

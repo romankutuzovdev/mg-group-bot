@@ -1,0 +1,36 @@
+# Деплой на VPS при push в main.
+# Secrets в GitHub → Settings → Secrets and variables → Actions:
+#   SSH_HOST       — IP или домен сервера
+#   SSH_USER       — например root
+#   SSH_PRIVATE_KEY — приватный ключ (весь файл, включая BEGIN/END)
+#   SSH_PORT       — опционально, по умолчанию 22
+#   APP_DIR        — опционально, по умолчанию /opt/mg-crm
+name: Deploy to server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            APP_DIR="${{ secrets.APP_DIR }}"
+            APP_DIR="${APP_DIR:-/opt/mg-crm}"
+            if [[ ! -d "$APP_DIR/.git" ]]; then
+              echo "На сервере ещё нет git-клона в $APP_DIR"
+              echo "Сделайте один раз: git clone <repo> $APP_DIR && bash $APP_DIR/deploy/deploy.sh ваш-домен.by"
+              exit 1
+            fi
+            sudo APP_DIR="$APP_DIR" bash "$APP_DIR/deploy/update-from-git.sh"
